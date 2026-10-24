@@ -1,0 +1,402 @@
+# PHP para Linux: php, php-fpm y el xdebug.so de cada rama, compilados con static-php-cli
+# (StaticPHP 3.0.0-alpha1) contra glibc 2.17 (SPC_TARGET=x86_64-linux-gnu.2.17, x86_64 generico:
+# corre en cualquier distro de 2014 en adelante y en cualquier CPU). Un tar.gz por rama,
+# php-<version>-nts-linux-x86_64.tar.gz, con el layout que instala Roost:
+#   bin/php, bin/php-fpm, ext/xdebug.so, BUILD.json, licenses/
+# Las fuentes se verifican antes de compilar: el tar.xz de PHP contra el SHA-256 que publica php.net
+# y el tgz de Xdebug contra el SHA-256 de xdebug.org. Lanzado a mano solo deja artefactos; con
+# publish=true (o por la etiqueta php-<version>) publica la release php-<version> de cada rama con su
+# SHA256SUMS.txt y la attestation. Roost fija en su binario el SHA-256 de cada tar.gz (LinuxPhpCatalog).
+name: PHP
+
+on:
+  workflow_dispatch:
+    inputs:
+      branches:
+        description: 'Ramas a compilar, separadas por comas (la ultima version de cada una, segun php.net)'
+        type: string
+        default: '8.5,8.4,8.3,8.2,8.1'
+      publish:
+        description: 'Publicar la release php-<version> de cada rama (sin marcar, solo quedan los artefactos)'
+        type: boolean
+        default: false
+  push:
+    tags: ['php-*']
+    # En la rama de trabajo, cada cambio del workflow lo compila (GitHub solo registra un workflow
+    # cuando corre por un evento; hasta entonces no se puede lanzar a mano). En main no se dispara por push.
+    branches: ['feat/php']
+    paths: ['.github/workflows/php.yml']
+
+permissions:
+  contents: read
+
+env:
+  # static-php-cli se ejecuta desde su fuente, fijado por commit: el de la rama v3 del que salio el
+  # nightly spc-linux-x86_64 del 22-oct-2026 (StaticPHP 3.0.0-alpha1, SHA-256 del binario
+  # 93abec4095cd204fc63d7dd7db3ab431991c3ecb04eaa8521e18bc76e5dc6100). No hay etiqueta 3.0 todavia y
+  # los nightlies no se conservan, asi que el commit es lo unico inmutable.
+  SPC_VERSION: 3.0.0-alpha1
+  SPC_REPO: https://github.com/crazywhalecc/static-php-cli.git
+  SPC_COMMIT: d7f1a88dad6d78fefa76b249b05dab1ddcff364b
+  # x86_64 generico, no «native»: native compila para la CPU del runner (AVX-512...) y en otra CPU da
+  # «Illegal instruction». gnu.2.17: enlaza contra glibc 2.17 (corre en cualquier distro posterior).
+  SPC_TARGET: x86_64-linux-gnu.2.17
+  MAX_GLIBC: '2.17'
+  # Xdebug: la fuente de xdebug.org, con el SHA-256 que publica su pagina de descargas.
+  XDEBUG_VERSION: 3.5.3
+  XDEBUG_SHA256: f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d
+  # El nombre del artefacto de Xdebug en static-php-cli v3 (config/pkg/ext/ext-xdebug.yml).
+  XDEBUG_ARTIFACT: ext-xdebug
+  # Las 41 extensiones del plan (lo que necesitan Laravel, WordPress y Symfony), integradas en el binario.
+  EXTENSIONS: apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_sqlite,phar,posix,redis,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib
+  # No se puede llamar LIBS: es la variable de autotools y OpenSSL la usaria para enlazar.
+  GD_PACKAGES: freetype,libjpeg,libwebp
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Ramas y si se publica
+        id: plan
+        env:
+          BRANCHES: ${{ inputs.branches }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/php-* ]]; then
+            version="${GITHUB_REF#refs/tags/php-}"
+            [[ "$version" =~ ^8\.[1-9]\.[0-9]+$ ]] || { echo "::error::La etiqueta $GITHUB_REF no es php-8.x.y"; exit 1; }
+            matrix=$(jq -nc --arg b "${version%.*}" --arg v "$version" '{include: [{branch: $b, tag_version: $v}]}')
+            publish=true
+          else
+            matrix=$(printf '%s\n' "${BRANCHES:-8.5,8.4,8.3,8.2,8.1}" | tr -d ' ' | tr ',' '\n' | grep -E '^8\.[1-9]$' | jq -Rnc '{include: [inputs | {branch: ., tag_version: ""}]}')
+            publish="${PUBLISH:-false}"
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "$matrix"
+          echo "publish=$publish"
+
+  build:
+    name: PHP ${{ matrix.branch }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    env:
+      BRANCH: ${{ matrix.branch }}
+      TAG_VERSION: ${{ matrix.tag_version }}
+      SPC_DIR: ${{ github.workspace }}/spc
+      # static-php-cli baja muchas librerias de releases de GitHub por la API, que sin token limita a 60
+      # peticiones por hora y por IP (y los runners comparten IP): con el token del workflow no se agota.
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Version y SHA-256 de la fuente, segun php.net
+        id: php
+        run: |
+          set -euo pipefail
+          json=$(curl -fsSL --retry 3 "https://www.php.net/releases/index.php?json&version=${BRANCH}&max=1")
+          version=$(jq -r 'keys[0]' <<<"$json")
+          sha=$(jq -r '.[keys[0]].source[] | select(.filename | endswith(".tar.xz")) | .sha256' <<<"$json")
+          file="php-${version}.tar.xz"
+          [[ "$version" =~ ^${BRANCH//./\\.}\.[0-9]+$ ]] || { echo "::error::php.net da '$version' para la rama $BRANCH"; exit 1; }
+          [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::php.net no da el SHA-256 de $file"; exit 1; }
+          if [ -n "$TAG_VERSION" ] && [ "$TAG_VERSION" != "$version" ]; then
+            echo "::error::La etiqueta pide $TAG_VERSION, pero php.net publica $version para la rama $BRANCH"; exit 1
+          fi
+          echo "PHP $version: $file (SHA-256 $sha)"
+          { echo "version=$version"; echo "file=$file"; echo "sha256=$sha"; } >> "$GITHUB_OUTPUT"
+
+      - name: PHP con el que corre static-php-cli
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, zlib, curl, openssl
+          tools: composer:v2
+          coverage: none
+
+      - name: static-php-cli ${{ env.SPC_VERSION }} (commit ${{ env.SPC_COMMIT }})
+        env:
+          COMPOSER_AUTH: '{"github-oauth": {"github.com": "${{ github.token }}"}}'
+        run: |
+          set -euo pipefail
+          git init -q "$SPC_DIR"
+          cd "$SPC_DIR"
+          git remote add origin "$SPC_REPO"
+          git fetch -q --depth 1 origin "$SPC_COMMIT"
+          git checkout -q FETCH_HEAD
+          composer install --no-dev --no-interaction --no-progress --quiet
+          printf '#!/bin/sh\nexec php -d memory_limit=-1 "%s/bin/spc" "$@"\n' "$SPC_DIR" > spc
+          chmod +x spc
+          ./spc --version | tee version.txt
+          grep -q "StaticPHP ${SPC_VERSION}" version.txt || { echo "::error::spc no es StaticPHP ${SPC_VERSION}"; exit 1; }
+
+      - name: Doctor
+        working-directory: ${{ env.SPC_DIR }}
+        run: ./spc doctor --auto-fix
+
+      - name: Descargar las fuentes (php.net, xdebug.org y las librerias)
+        working-directory: ${{ env.SPC_DIR }}
+        run: |
+          set -euo pipefail
+          # php-src lo baja el propio spc de php.net (php-X.Y.Z.tar.xz, la ultima de la rama); Xdebug (que
+          # build:php compila como compartida) se pide aqui tambien, forzado al tgz de xdebug.org, que es
+          # el que publica su SHA-256. Los dos se verifican despues. El lock de spc es downloads/.cache.json.
+          ./spc download --for-extensions "${EXTENSIONS},xdebug" --for-packages "$GD_PACKAGES" --with-php "$BRANCH" \
+            --custom-url "${XDEBUG_ARTIFACT}:https://xdebug.org/files/xdebug-${XDEBUG_VERSION}.tgz" \
+            --prefer-binary --retry 3
+
+      - name: Verificar las fuentes contra php.net y xdebug.org
+        id: verify
+        working-directory: ${{ env.SPC_DIR }}
+        env:
+          PHP_FILE: ${{ steps.php.outputs.file }}
+          PHP_SHA256: ${{ steps.php.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          echo "== downloads/"; ls -la downloads | head -80
+          # Los ficheros de los que spc extrae las fuentes, comparados con lo que publican php.net y xdebug.org.
+          php_file="downloads/$PHP_FILE"
+          [ -f "$php_file" ] || { echo "::error::spc no ha dejado $php_file"; exit 1; }
+          echo "$PHP_SHA256  $php_file" | sha256sum -c -
+          xd_file=$(ls "downloads/xdebug-${XDEBUG_VERSION}.tgz" 2>/dev/null || ls downloads/*xdebug* 2>/dev/null | head -1 || true)
+          [ -n "$xd_file" ] && [ -f "$xd_file" ] || { echo "::error::no esta el tgz de Xdebug en downloads/"; exit 1; }
+          echo "$XDEBUG_SHA256  $xd_file" | sha256sum -c -
+          echo "xdebug_file=$(basename "$xd_file")" >> "$GITHUB_OUTPUT"
+
+      - name: Compilar
+        working-directory: ${{ env.SPC_DIR }}
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+          PHP_FILE: ${{ steps.php.outputs.file }}
+          PHP_SHA256: ${{ steps.php.outputs.sha256 }}
+          XDEBUG_FILE: ${{ steps.verify.outputs.xdebug_file }}
+        run: |
+          set -euo pipefail
+          ./spc build:php "$EXTENSIONS" --with-packages="$GD_PACKAGES" --build-cli --build-fpm --build-shared=xdebug \
+            --dl-with-php="$BRANCH" --dl-prefer-binary --dl-retry=3 -v
+          # Lo compilado es lo verificado: los ficheros siguen intactos y la fuente extraida es esa version.
+          echo "$PHP_SHA256  downloads/$PHP_FILE" | sha256sum -c -
+          echo "$XDEBUG_SHA256  downloads/$XDEBUG_FILE" | sha256sum -c -
+          grep -E "^#define PHP_VERSION \"${VERSION}\"" source/php-src/main/php_version.h
+          ls -la buildroot/bin buildroot/modules
+
+      - name: Layout, licencias y BUILD.json
+        id: stage
+        working-directory: ${{ env.SPC_DIR }}
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+          PHP_FILE: ${{ steps.php.outputs.file }}
+          PHP_SHA256: ${{ steps.php.outputs.sha256 }}
+          XDEBUG_FILE: ${{ steps.verify.outputs.xdebug_file }}
+        run: |
+          set -euo pipefail
+          stage="$GITHUB_WORKSPACE/stage"
+          rm -rf "$stage" && mkdir -p "$stage/bin" "$stage/ext" "$stage/licenses"
+          cp buildroot/bin/php buildroot/bin/php-fpm "$stage/bin/"
+          cp buildroot/modules/xdebug.so "$stage/ext/"
+          chmod 755 "$stage/bin/php" "$stage/bin/php-fpm"
+          chmod 644 "$stage/ext/xdebug.so"
+
+          # Licencias: las de PHP y Xdebug (obligatorias), la de static-php-cli y las de las librerias
+          # que van enlazadas (dump-license, si puede).
+          cp source/php-src/LICENSE "$stage/licenses/PHP-LICENSE"
+          xdebug_src=$(ls -d source/${XDEBUG_ARTIFACT} 2>/dev/null || ls -d source/xdebug* | head -1)
+          cp "$xdebug_src/LICENSE" "$stage/licenses/XDEBUG-LICENSE"
+          cp LICENSE "$stage/licenses/static-php-cli-LICENSE"
+          ./spc dump-license php-src,${XDEBUG_ARTIFACT} --for-extensions "$EXTENSIONS" --for-packages "$GD_PACKAGES" --dump-dir "$stage/licenses/libraries" \
+            || echo "::warning::dump-license no ha podido volcar las licencias de las librerias"
+          ls -la "$stage/licenses" "$stage/licenses/libraries" 2>/dev/null || true
+
+          glibc=$(objdump -T "$stage/bin/php" "$stage/bin/php-fpm" "$stage/ext/xdebug.so" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | uniq | tail -1)
+          xdebug=$("$stage/bin/php" -n -d "zend_extension=$stage/ext/xdebug.so" -r 'echo phpversion("xdebug");')
+          jq -n \
+            --arg php "$VERSION" --arg ext "$EXTENSIONS" --arg xdebug "$xdebug" \
+            --arg spcv "$SPC_VERSION" --arg spcc "$SPC_COMMIT" --arg target "$SPC_TARGET" --arg glibc "$glibc" \
+            --arg file "$PHP_FILE" --arg sha "$PHP_SHA256" --arg xfile "$XDEBUG_FILE" --arg xsha "$XDEBUG_SHA256" \
+            --arg built "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{
+              php: $php, variant: "nts", os: "linux", arch: "x86_64",
+              extensions: ($ext | split(",")),
+              shared: { xdebug: $xdebug },
+              static_php_cli: { version: $spcv, commit: $spcc },
+              target: $target, glibc: $glibc,
+              source: { file: $file, sha256: $sha, url: ("https://www.php.net/distributions/" + $file) },
+              xdebug_source: { file: $xfile, sha256: $xsha, url: ("https://xdebug.org/files/" + $xfile) },
+              built: $built, run: $run
+            }' > "$stage/BUILD.json"
+          cat "$stage/BUILD.json"
+          echo "glibc=$glibc" >> "$GITHUB_OUTPUT"
+          echo "xdebug=$xdebug" >> "$GITHUB_OUTPUT"
+
+      - name: Comprobar (php -v, php -m, php-fpm -t, xdebug, glibc, ldd)
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+          GLIBC: ${{ steps.stage.outputs.glibc }}
+          XDEBUG: ${{ steps.stage.outputs.xdebug }}
+        run: |
+          set -euo pipefail
+          stage="$GITHUB_WORKSPACE/stage"
+          cd "$stage"
+          bin/php -n -v | tee /tmp/php-v.txt
+          grep -q "^PHP ${VERSION} " /tmp/php-v.txt || { echo "::error::php -v no es PHP ${VERSION}"; exit 1; }
+          bin/php -n -m | tee /tmp/php-m.txt
+          missing=""
+          for ext in ${EXTENSIONS//,/ }; do
+            name="$ext"; [ "$ext" = opcache ] && name="Zend OPcache"
+            grep -qix "$name" /tmp/php-m.txt || missing="$missing $ext"
+          done
+          [ -z "$missing" ] || { echo "::error::php -m no lista:$missing"; exit 1; }
+          bin/php-fpm -n -v | tee /tmp/fpm-v.txt
+          grep -q "^PHP ${VERSION} (fpm" /tmp/fpm-v.txt || { echo "::error::php-fpm -v no es PHP ${VERSION}"; exit 1; }
+          # Una conf minima como la que escribe Roost (PhpFpmConf): sin user/group, TCP en 127.0.0.1.
+          cat > /tmp/php-fpm.conf <<EOF
+          [global]
+          pid = /tmp/php-fpm.pid
+          error_log = /tmp/php-fpm.log
+          daemonize = no
+          [www]
+          listen = 127.0.0.1:9850
+          listen.allowed_clients = 127.0.0.1
+          pm = dynamic
+          pm.max_children = 4
+          pm.start_servers = 1
+          pm.min_spare_servers = 1
+          pm.max_spare_servers = 2
+          pm.max_requests = 500
+          catch_workers_output = yes
+          clear_env = no
+          EOF
+          bin/php-fpm -n -t -y /tmp/php-fpm.conf 2>&1 | tee /tmp/fpm-t.txt
+          grep -q "test is successful" /tmp/fpm-t.txt || { echo "::error::php-fpm -t falla"; exit 1; }
+          bin/php -n -d "zend_extension=$stage/ext/xdebug.so" -v | tee /tmp/php-xdebug.txt
+          grep -q "with Xdebug v${XDEBUG_VERSION}" /tmp/php-xdebug.txt || { echo "::error::xdebug.so no carga como Xdebug ${XDEBUG_VERSION}"; exit 1; }
+          [ "$XDEBUG" = "$XDEBUG_VERSION" ] || { echo "::error::phpversion('xdebug') da $XDEBUG"; exit 1; }
+          echo "glibc maxima: $GLIBC (tope $MAX_GLIBC)"
+          [ "$(printf '%s\n%s\n' "$GLIBC" "$MAX_GLIBC" | sort -V | tail -1)" = "$MAX_GLIBC" ] || { echo "::error::pide GLIBC_$GLIBC, mas que $MAX_GLIBC"; exit 1; }
+          ldd bin/php bin/php-fpm
+          # Solo la libc y sus hermanas: nada de /usr/lib que no venga con cualquier distro.
+          ldd bin/php bin/php-fpm | grep '=>' | grep -v -E 'lib(c|m|dl|rt|pthread|util|resolv)\.so' | grep -v 'ld-linux' && { echo "::error::enlaza con algo mas que la libc"; exit 1; } || true
+          file bin/php bin/php-fpm ext/xdebug.so
+
+      - name: Comprobar que php-fpm sirve por FastCGI
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq libfcgi-bin >/dev/null
+          stage="$GITHUB_WORKSPACE/stage"
+          mkdir -p /tmp/www && printf '<?php echo "OK ", PHP_VERSION, " ", php_sapi_name(), "\n";' > /tmp/www/index.php
+          "$stage/bin/php-fpm" -n -F -y /tmp/php-fpm.conf &
+          pid=$!
+          for i in $(seq 1 50); do (echo > /dev/tcp/127.0.0.1/9850) 2>/dev/null && break; sleep 0.2; done
+          SCRIPT_FILENAME=/tmp/www/index.php REQUEST_METHOD=GET cgi-fcgi -bind -connect 127.0.0.1:9850 | tee /tmp/fcgi.txt
+          grep -q "OK ${VERSION} fpm-fcgi" /tmp/fcgi.txt || { echo "::error::php-fpm no ha servido la pagina"; kill -9 $pid || true; exit 1; }
+          kill -QUIT $pid
+          wait $pid && echo "php-fpm ha parado limpio con SIGQUIT"
+          cat /tmp/php-fpm.log
+
+      - name: Comprobar que arranca en distros viejas (glibc 2.17 a 2.28)
+        run: |
+          set -euo pipefail
+          stage="$GITHUB_WORKSPACE/stage"
+          for image in centos:7 debian:10 ubuntu:18.04; do
+            echo "== $image"
+            docker run --rm -v "$stage:/php:ro" "$image" sh -c '/php/bin/php -n -d zend_extension=/php/ext/xdebug.so -v && /php/bin/php-fpm -n -v | head -1 && cat /etc/*release* | head -2'
+          done
+
+      - name: Comprobar que arranca en otra CPU (qemu, sin AVX)
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq qemu-user >/dev/null
+          stage="$GITHUB_WORKSPACE/stage"
+          grep -m1 'model name' /proc/cpuinfo
+          # qemu64 es la CPU x86-64 minima (sin AVX ni SSE4): un build «native» moriria aqui con SIGILL.
+          qemu-x86_64 -cpu qemu64 -L / "$stage/bin/php" -n -d "zend_extension=$stage/ext/xdebug.so" -r 'echo "OK ", PHP_VERSION, " xdebug ", phpversion("xdebug"), "\n";'
+          qemu-x86_64 -cpu qemu64 -L / "$stage/bin/php-fpm" -n -v | head -1
+
+      - name: Empaquetar y firmar las sumas
+        id: pack
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+        run: |
+          set -euo pipefail
+          stage="$GITHUB_WORKSPACE/stage"
+          out="$GITHUB_WORKSPACE/out"
+          mkdir -p "$out"
+          name="php-${VERSION}-nts-linux-x86_64.tar.gz"
+          tar --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$(date +%s)" \
+            -czf "$out/$name" -C "$stage" bin ext licenses BUILD.json
+          cp "$stage/BUILD.json" "$out/BUILD.json"
+          (cd "$out" && sha256sum "$name" > SHA256SUMS.txt && cat SHA256SUMS.txt && ls -la)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          # Que el tar se extrae con lo que esperamos y los permisos se conservan.
+          mkdir -p /tmp/extract && tar -xzf "$out/$name" -C /tmp/extract
+          test -x /tmp/extract/bin/php && test -x /tmp/extract/bin/php-fpm && test -f /tmp/extract/ext/xdebug.so && test -f /tmp/extract/BUILD.json
+          /tmp/extract/bin/php -n -v | head -1
+
+      - name: Artefacto php-${{ matrix.branch }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: php-${{ matrix.branch }}
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: Publicar PHP ${{ matrix.branch }}
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Artefacto
+        uses: actions/download-artifact@v8
+        with:
+          name: php-${{ matrix.branch }}
+          path: out
+
+      - name: Comprobar las sumas
+        id: info
+        run: |
+          set -euo pipefail
+          cd out
+          sha256sum -c SHA256SUMS.txt
+          version=$(jq -r .php BUILD.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -la
+
+      - name: Attestation de procedencia
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: out/php-*.tar.gz
+
+      - name: Release php-${{ steps.info.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.info.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="php-${VERSION}"
+          cat > /tmp/notes.md <<EOF
+          PHP ${VERSION} para Linux x86_64 (NTS): \`bin/php\`, \`bin/php-fpm\` y \`ext/xdebug.so\` (Xdebug $(jq -r .shared.xdebug out/BUILD.json)), compilado con static-php-cli $(jq -r .static_php_cli.version out/BUILD.json) contra glibc $(jq -r .glibc out/BUILD.json) (corre en cualquier distro con glibc ≥ 2.17). Las extensiones van integradas en el binario: $(jq -r '.extensions | join(", ")' out/BUILD.json).
+
+          Fuente: \`$(jq -r .source.file out/BUILD.json)\` de php.net, SHA-256 \`$(jq -r .source.sha256 out/BUILD.json)\` (verificado antes de compilar); Xdebug: \`$(jq -r .xdebug_source.file out/BUILD.json)\` de xdebug.org, SHA-256 \`$(jq -r .xdebug_source.sha256 out/BUILD.json)\`.
+
+          Para comprobarlo: \`sha256sum -c SHA256SUMS.txt\` y \`gh attestation verify $(jq -r .php out/BUILD.json | sed 's/^/php-/;s/$/-nts-linux-x86_64.tar.gz/') --repo ${GH_REPO}\`. Lo instala Roost (\`roost php install ${VERSION%.*}\`). Build: $(jq -r .run out/BUILD.json).
+          EOF
+          args=(--title "PHP ${VERSION} (Linux x86_64)" --notes-file /tmp/notes.md)
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--verify-tag); else args+=(--target "$GITHUB_SHA"); fi
+          gh release create "$tag" "${args[@]}" out/php-*.tar.gz out/SHA256SUMS.txt out/BUILD.json
