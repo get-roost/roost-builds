@@ -1,0 +1,67 @@
+# Spike (Paso 0 del plan de Linux): ¿sale con static-php-cli un PHP glibc con php-fpm, las
+# extensiones que necesitan Laravel, WordPress y Symfony, y un xdebug.so que cargue? ¿Y en 7.4 y 8.0?
+# Solo deja artefactos; no publica nada. Lo de verdad será php.yml.
+name: Spike PHP
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  EXTENSIONS: apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_sqlite,phar,posix,redis,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib
+  LIBS: freetype,libjpeg,libwebp
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.4", "8.0", "7.4"]
+    steps:
+      - name: spc
+        run: |
+          curl -fsSL https://dl.static-php.dev/v3/spc-bin/nightly/spc-linux-x86_64 -o spc
+          chmod +x spc
+          ./spc --version
+          sha256sum spc
+          ./spc build:php --help | head -80
+
+      - name: Doctor
+        run: ./spc doctor --auto-fix
+
+      - name: Fuentes
+        run: ./spc download --for-extensions="$EXTENSIONS" --for-libs="$LIBS" --with-php=${{ matrix.php }} --prefer-binary --retry=3
+
+      - name: Build
+        env:
+          SPC_TARGET: native-native-gnu.2.17
+        run: ./spc build:php "$EXTENSIONS" --with-libs="$LIBS" --build-cli --build-fpm --build-shared=xdebug -vv
+
+      - name: Comprobar
+        run: |
+          set -x
+          ls -la buildroot/bin buildroot/modules || true
+          file buildroot/bin/php buildroot/bin/php-fpm || true
+          ldd buildroot/bin/php || true
+          buildroot/bin/php -v
+          buildroot/bin/php -m
+          buildroot/bin/php-fpm -v
+          buildroot/bin/php -d "zend_extension=$PWD/buildroot/modules/xdebug.so" -v
+          buildroot/bin/php -d "zend_extension=$PWD/buildroot/modules/xdebug.so" --ri xdebug | head -5
+          objdump -T buildroot/bin/php | grep -o 'GLIBC_[0-9.]*' | sort -V | uniq | tail -3
+
+      - name: Artefacto
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: spike-php-${{ matrix.php }}
+          path: |
+            buildroot/bin/php
+            buildroot/bin/php-fpm
+            buildroot/modules/*.so
+          if-no-files-found: ignore
