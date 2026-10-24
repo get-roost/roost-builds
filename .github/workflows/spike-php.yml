@@ -34,13 +34,12 @@ jobs:
       - name: Doctor
         run: ./spc doctor --auto-fix
 
-      - name: Fuentes
-        run: ./spc download --for-extensions="$EXTENSIONS" --for-libs="$LIBS" --with-php=${{ matrix.php }} --prefer-binary --retry=3
-
+      # build:php descarga lo que le falta: la rama con --dl-with-php (por defecto, la 8.5) y las
+      # librerías opcionales de gd con --with-packages (--with-libs es «legacy» y acaba en el enlazado).
       - name: Build
         env:
           SPC_TARGET: native-native-gnu.2.17
-        run: ./spc build:php "$EXTENSIONS" --with-libs="$LIBS" --build-cli --build-fpm --build-shared=xdebug -vv
+        run: ./spc build:php "$EXTENSIONS" --with-packages="$LIBS" --build-cli --build-fpm --build-shared=xdebug --dl-with-php=${{ matrix.php }} --dl-prefer-binary --dl-retry=3 -vv
 
       - name: Comprobar
         run: |
