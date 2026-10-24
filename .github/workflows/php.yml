@@ -159,28 +159,31 @@ jobs:
           PHP_SHA256: ${{ steps.php.outputs.sha256 }}
         run: |
           set -euo pipefail
-          lock=downloads/.lock.json
-          echo "== php-src y ${XDEBUG_ARTIFACT} en $lock"
-          jq --arg x "$XDEBUG_ARTIFACT" '{"php-src", ($x): .[$x]}' "$lock"
-          php_file=$(jq -r '."php-src".filename // ."php-src".source.filename // empty' "$lock")
-          xd_file=$(jq -r --arg x "$XDEBUG_ARTIFACT" '.[$x].filename // .[$x].source.filename // empty' "$lock")
-          if [ -z "$php_file" ] || [ -z "$xd_file" ]; then
-            echo "::error::El lock de descargas no dice el fichero de php-src o de ${XDEBUG_ARTIFACT}"; jq 'keys' "$lock"; exit 1
-          fi
-          [ "$php_file" = "$PHP_FILE" ] || { echo "::error::spc bajo $php_file y no $PHP_FILE"; exit 1; }
-          echo "$PHP_SHA256  downloads/$php_file" | sha256sum -c -
-          echo "$XDEBUG_SHA256  downloads/$xd_file" | sha256sum -c -
-          jq -c --arg x "$XDEBUG_ARTIFACT" '{"php-src", ($x): .[$x]}' "$lock" > /tmp/lock-verificado.json
-          echo "xdebug_file=$xd_file" >> "$GITHUB_OUTPUT"
+          echo "== downloads/"; ls -la downloads | head -80
+          # Los ficheros de los que spc extrae las fuentes, comparados con lo que publican php.net y xdebug.org.
+          php_file="downloads/$PHP_FILE"
+          [ -f "$php_file" ] || { echo "::error::spc no ha dejado $php_file"; exit 1; }
+          echo "$PHP_SHA256  $php_file" | sha256sum -c -
+          xd_file=$(ls "downloads/xdebug-${XDEBUG_VERSION}.tgz" 2>/dev/null || ls downloads/*xdebug* 2>/dev/null | head -1 || true)
+          [ -n "$xd_file" ] && [ -f "$xd_file" ] || { echo "::error::no esta el tgz de Xdebug en downloads/"; exit 1; }
+          echo "$XDEBUG_SHA256  $xd_file" | sha256sum -c -
+          echo "xdebug_file=$(basename "$xd_file")" >> "$GITHUB_OUTPUT"
 
       - name: Compilar
         working-directory: ${{ env.SPC_DIR }}
+        env:
+          VERSION: ${{ steps.php.outputs.version }}
+          PHP_FILE: ${{ steps.php.outputs.file }}
+          PHP_SHA256: ${{ steps.php.outputs.sha256 }}
+          XDEBUG_FILE: ${{ steps.verify.outputs.xdebug_file }}
         run: |
           set -euo pipefail
           ./spc build:php "$EXTENSIONS" --with-packages="$GD_PACKAGES" --build-cli --build-fpm --build-shared=xdebug \
             --dl-with-php="$BRANCH" --dl-prefer-binary --dl-retry=3 -v
-          # Lo compilado es lo verificado: las entradas del lock no han cambiado durante el build.
-          jq -c --arg x "$XDEBUG_ARTIFACT" '{"php-src", ($x): .[$x]}' downloads/.lock.json | diff - /tmp/lock-verificado.json
+          # Lo compilado es lo verificado: los ficheros siguen intactos y la fuente extraida es esa version.
+          echo "$PHP_SHA256  downloads/$PHP_FILE" | sha256sum -c -
+          echo "$XDEBUG_SHA256  downloads/$XDEBUG_FILE" | sha256sum -c -
+          grep -E "^#define PHP_VERSION \"${VERSION}\"" source/php-src/main/php_version.h
           ls -la buildroot/bin buildroot/modules
 
       - name: Layout, licencias y BUILD.json
