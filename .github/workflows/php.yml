@@ -145,9 +145,10 @@ jobs:
         working-directory: ${{ env.SPC_DIR }}
         run: |
           set -euo pipefail
-          # php-src lo baja el propio spc de php.net (php-X.Y.Z.tar.xz, la ultima de la rama); Xdebug se
-          # fuerza al tgz de xdebug.org, que es el que publica su SHA-256. Los dos se verifican despues.
-          ./spc download --for-extensions "$EXTENSIONS" --for-packages "$GD_PACKAGES" --with-php "$BRANCH" \
+          # php-src lo baja el propio spc de php.net (php-X.Y.Z.tar.xz, la ultima de la rama); Xdebug (que
+          # build:php compila como compartida) se pide aqui tambien, forzado al tgz de xdebug.org, que es
+          # el que publica su SHA-256. Los dos se verifican despues. El lock de spc es downloads/.cache.json.
+          ./spc download --for-extensions "${EXTENSIONS},xdebug" --for-packages "$GD_PACKAGES" --with-php "$BRANCH" \
             --custom-url "${XDEBUG_ARTIFACT}:https://xdebug.org/files/xdebug-${XDEBUG_VERSION}.tgz" \
             --prefer-binary --retry 3
 
