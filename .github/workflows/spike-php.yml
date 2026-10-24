@@ -42,7 +42,7 @@ jobs:
           # x86_64 genérico, no «native»: native compila para la CPU del runner (AVX-512…) y en otra CPU da
           # «Illegal instruction». gnu.2.17: enlaza contra glibc 2.17 (corre en cualquier distro posterior).
           SPC_TARGET: x86_64-linux-gnu.2.17
-        run: ./spc build:php "$EXTENSIONS" --with-packages="$GD_PACKAGES" --build-cli --build-fpm --build-shared=xdebug --dl-with-php=${{ matrix.php }} --dl-prefer-binary --dl-retry=3 -vv
+        run: ./spc build:php "$EXTENSIONS" --with-packages="$GD_PACKAGES" --build-cli --build-fpm --build-cgi --build-shared=xdebug --dl-with-php=${{ matrix.php }} --dl-prefer-binary --dl-retry=3 -vv
 
       - name: Comprobar
         run: |
@@ -53,6 +53,7 @@ jobs:
           buildroot/bin/php -v
           buildroot/bin/php -m
           buildroot/bin/php-fpm -v
+          buildroot/bin/php-cgi -v
           buildroot/bin/php -d "zend_extension=$PWD/buildroot/modules/xdebug.so" -v
           buildroot/bin/php -d "zend_extension=$PWD/buildroot/modules/xdebug.so" --ri xdebug | head -5
           objdump -T buildroot/bin/php | grep -o 'GLIBC_[0-9.]*' | sort -V | uniq | tail -3
@@ -65,5 +66,6 @@ jobs:
           path: |
             buildroot/bin/php
             buildroot/bin/php-fpm
+            buildroot/bin/php-cgi
             buildroot/modules/*.so
           if-no-files-found: ignore
