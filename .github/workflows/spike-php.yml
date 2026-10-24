@@ -11,7 +11,8 @@ permissions:
 
 env:
   EXTENSIONS: apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_sqlite,phar,posix,redis,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib
-  LIBS: freetype,libjpeg,libwebp
+  # No se puede llamar LIBS: es la variable de autotools y OpenSSL la usaria para enlazar.
+  GD_PACKAGES: freetype,libjpeg,libwebp
 
 jobs:
   php:
@@ -21,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.0", "7.4"]
+        php: ["8.5", "8.4", "8.1", "8.0"]
     steps:
       - name: spc
         run: |
@@ -39,7 +40,7 @@ jobs:
       - name: Build
         env:
           SPC_TARGET: native-native-gnu.2.17
-        run: ./spc build:php "$EXTENSIONS" --with-packages="$LIBS" --build-cli --build-fpm --build-shared=xdebug --dl-with-php=${{ matrix.php }} --dl-prefer-binary --dl-retry=3 -vv
+        run: ./spc build:php "$EXTENSIONS" --with-packages="$GD_PACKAGES" --build-cli --build-fpm --build-shared=xdebug --dl-with-php=${{ matrix.php }} --dl-prefer-binary --dl-retry=3 -vv
 
       - name: Comprobar
         run: |
