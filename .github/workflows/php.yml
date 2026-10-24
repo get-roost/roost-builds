@@ -22,6 +22,10 @@ on:
         default: false
   push:
     tags: ['php-*']
+    # En la rama de trabajo, cada cambio del workflow lo compila (GitHub solo registra un workflow
+    # cuando corre por un evento; hasta entonces no se puede lanzar a mano). En main no se dispara por push.
+    branches: ['feat/php']
+    paths: ['.github/workflows/php.yml']
 
 permissions:
   contents: read
