@@ -25,6 +25,9 @@ on:
         default: false
   push:
     tags: ["nginx-*"]
+    # Mientras el workflow no esté en la rama principal, GitHub no deja lanzarlo a mano desde otra rama:
+    # cada push a feat/nginx compila y prueba (nunca publica). Al integrar se puede quitar.
+    branches: ["feat/nginx"]
 
 permissions:
   contents: read
