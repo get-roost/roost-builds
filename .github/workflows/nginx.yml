@@ -23,6 +23,10 @@ on:
         description: "Publicar la release nginx-<versión> (si no, solo artefactos)"
         type: boolean
         default: false
+      from_run:
+        description: "Con publish: publicar tal cual el artefacto de este run (su id), el ya probado, sin recompilar (recompilar podria dar otro SHA-256 que el fijado en Roost)"
+        required: false
+        default: ""
   push:
     tags: ["nginx-*"]
     # Mientras el workflow no esté en la rama principal, GitHub no deja lanzarlo a mano desde otra rama:
@@ -44,6 +48,7 @@ env:
 jobs:
   build:
     name: nginx ${{ inputs.version || '1.30.6' }}
+    if: ${{ inputs.from_run == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -193,6 +198,7 @@ jobs:
   test:
     name: Probar en Ubuntu
     needs: build
+    if: ${{ inputs.from_run == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -257,29 +263,40 @@ jobs:
           ! pgrep -f "casa/bin/nginx/$V/nginx" || { echo "nginx sigue en marcha tras -s quit"; exit 1; }
           cat casa/logs/nginx-error.log || true
 
-  # Solo con publish: true o por la etiqueta nginx-<versión>: attestation de procedencia y la release.
+  # Solo con publish: true o por la etiqueta nginx-<versión>: attestation de procedencia y la release. Con
+  # from_run se publica el artefacto de ese run (el que se probó y cuyo SHA-256 lleva Roost) sin recompilar.
   release:
     name: Release
     needs: [build, test]
-    if: ${{ inputs.publish == true || startsWith(github.ref, 'refs/tags/nginx-') }}
+    if: ${{ !cancelled() && (inputs.publish == true || startsWith(github.ref, 'refs/tags/nginx-')) && (inputs.from_run != '' || needs.test.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
       id-token: write
       attestations: write
+      actions: read
+    env:
+      V: ${{ inputs.version || needs.build.outputs.version }}
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: nginx-${{ needs.build.outputs.version }}-linux-x86_64
+          name: nginx-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Comprobar el artefacto
+        run: |
+          set -euo pipefail
+          ls -la
+          sha256sum -c SHA256SUMS.txt
+          sha256sum "nginx-$V-linux-x86_64.tar.gz"
       - name: Attestation
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
-          subject-path: nginx-${{ needs.build.outputs.version }}-linux-x86_64.tar.gz
-      - name: Release nginx-${{ needs.build.outputs.version }}
+          subject-path: nginx-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64.tar.gz
+      - name: Release nginx-${{ inputs.version || needs.build.outputs.version }}
         env:
           GH_TOKEN: ${{ github.token }}
-          V: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
           notes="nginx $V estatico para Linux x86_64 (musl; pcre2, zlib y OpenSSL enlazados), compilado desde el tarball de nginx.org con su firma PGP verificada. Lo instala Roost en Linux. Verificar: \`sha256sum -c SHA256SUMS.txt\` y \`gh attestation verify nginx-$V-linux-x86_64.tar.gz --repo get-roost/roost-builds\`."
