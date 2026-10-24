@@ -1,0 +1,307 @@
+# nginx estático para Linux x86_64 (el que instala Roost en Linux, plan de Linux L1 «Cimientos y nginx»).
+#
+# Se compila en Alpine (musl) enlazado del todo en estático con pcre2, zlib y OpenSSL, así corre en
+# cualquier distro x86_64 sin depender de la glibc ni de librerías del sistema. La fuente es el tarball
+# de nginx.org, verificado con su firma PGP (.asc) contra las claves de nginx.org/keys y, además, con la
+# huella del firmante fijada aquí (si una release la firma otra persona de nginx, se comprueba en
+# nginx.org/keys y se añade su huella; una clave nueva no se acepta sola).
+#
+# Deja el artefacto nginx-<versión>-linux-x86_64.tar.gz (nginx, conf/mime.types, conf/fastcgi_params,
+# conf/fastcgi.conf, las licencias y BUILD.txt con el `nginx -V`) y SHA256SUMS.txt. Solo publica la
+# release `nginx-<versión>` con `publish: true` o por la etiqueta; un workflow_dispatch normal deja
+# solo artefactos. El SHA-256 del tar.gz va fijado también en Roost (NginxCatalog.Linux).
+name: nginx
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión de nginx (rama estable)"
+        required: true
+        default: "1.30.6"
+      publish:
+        description: "Publicar la release nginx-<versión> (si no, solo artefactos)"
+        type: boolean
+        default: false
+      from_run:
+        description: "Con publish: publicar tal cual el artefacto de este run (su id), el ya probado, sin recompilar (recompilar podria dar otro SHA-256 que el fijado en Roost)"
+        required: false
+        default: ""
+  push:
+    tags: ["nginx-*"]
+    # Mientras el workflow no esté en la rama principal, GitHub no deja lanzarlo a mano desde otra rama:
+    # cada push a feat/nginx compila y prueba (nunca publica). Al integrar se puede quitar.
+    branches: ["feat/nginx"]
+
+permissions:
+  contents: read
+
+env:
+  # Huellas PGP de quien puede firmar los tarballs de nginx.org (https://nginx.org/keys/):
+  #   D678 6CE3 03D9 A902 2998 DC6C C846 4D54 9AF7 5C0A  Sergey Kandaurov (pluknet.key): firmó la 1.30.6
+  #   573B FD6B 3D8F BC64 1079 A6AB ABF5 BD82 7BD9 BF62  nginx signing key (nginx_signing.key)
+  TRUSTED_FINGERPRINTS: "D6786CE303D9A9022998DC6CC8464D549AF75C0A 573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
+  ALPINE: "alpine:3.22"
+  # La que se compila en un push a la rama (sin input ni etiqueta): la que fija Roost (NginxCatalog).
+  DEFAULT_VERSION: "1.30.6"
+
+jobs:
+  build:
+    name: nginx ${{ inputs.version || '1.30.6' }}
+    if: ${{ inputs.from_run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Versión
+        id: version
+        run: |
+          # A mano, la del input; por etiqueta nginx-<versión>, la de la etiqueta; en un push a la rama, la fijada.
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/nginx-*) v="${GITHUB_REF_NAME#nginx-}" ;;
+              *) v="$DEFAULT_VERSION" ;;
+            esac
+          fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Versión rara: $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "NGINX_VERSION=$v" >> "$GITHUB_ENV"
+
+      # La fuente, verificada ANTES de compilar nada: la firma .asc con las claves de nginx.org y la
+      # huella del firmante contra la lista fijada arriba. gpg da VALIDSIG aunque la clave no tenga
+      # confianza asignada: por eso se comprueba la huella a mano.
+      - name: Fuente de nginx.org y firma PGP
+        run: |
+          set -euo pipefail
+          mkdir -p source && cd source
+          curl -fsSL -A "roost-builds (curl)" -o "nginx-$NGINX_VERSION.tar.gz" "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz"
+          curl -fsSL -A "roost-builds (curl)" -o "nginx-$NGINX_VERSION.tar.gz.asc" "https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz.asc"
+          export GNUPGHOME="$(mktemp -d)"
+          for key in pluknet nginx_signing thresh arut; do
+            curl -fsSL -A "roost-builds (curl)" "https://nginx.org/keys/$key.key" | gpg --batch --import || echo "no se pudo importar $key.key (si no es el firmante, da igual)"
+          done
+          gpg --batch --status-fd 3 --verify "nginx-$NGINX_VERSION.tar.gz.asc" "nginx-$NGINX_VERSION.tar.gz" 3> status.txt
+          signer=$(awk '/^\[GNUPG:\] VALIDSIG/ { print $3 }' status.txt)
+          echo "Firmado por la huella: $signer"
+          case " $TRUSTED_FINGERPRINTS " in
+            *" $signer "*) echo "La huella esta en la lista de confianza." ;;
+            *) echo "::error::La firma es valida pero la huella $signer no esta en TRUSTED_FINGERPRINTS: compruebala en nginx.org/keys antes de aceptarla."; exit 1 ;;
+          esac
+          sha256sum "nginx-$NGINX_VERSION.tar.gz" | tee source-sha256.txt
+
+      # Compila dentro de Alpine (desde el host, que es quien sube los artefactos): todo estático.
+      - name: Compilar (Alpine, estático)
+        run: |
+          set -euo pipefail
+          cat > build.sh <<'EOF'
+          set -euxo pipefail
+          apk add --no-cache build-base linux-headers perl pcre2-dev pcre2-static zlib-dev zlib-static openssl-dev openssl-libs-static tar
+          cd /work/source
+          tar -xzf "nginx-$NGINX_VERSION.tar.gz"
+          cd "nginx-$NGINX_VERSION"
+          # Rutas relativas al prefijo (como el zip de Windows): Roost arranca con -p <raiz>/ y -c <su nginx.conf>,
+          # y pone pid, logs y *_temp_path a mano; estos valores solo cuentan hasta que lee la configuracion.
+          ./configure \
+            --prefix=. \
+            --sbin-path=nginx \
+            --conf-path=conf/nginx.conf \
+            --pid-path=logs/nginx.pid \
+            --lock-path=logs/nginx.lock \
+            --error-log-path=logs/error.log \
+            --http-log-path=logs/access.log \
+            --http-client-body-temp-path=temp/client_body_temp \
+            --http-proxy-temp-path=temp/proxy_temp \
+            --http-fastcgi-temp-path=temp/fastcgi_temp \
+            --http-uwsgi-temp-path=temp/uwsgi_temp \
+            --http-scgi-temp-path=temp/scgi_temp \
+            --with-threads \
+            --with-http_ssl_module \
+            --with-http_v2_module \
+            --with-http_realip_module \
+            --with-http_addition_module \
+            --with-http_sub_module \
+            --with-http_dav_module \
+            --with-http_flv_module \
+            --with-http_mp4_module \
+            --with-http_gunzip_module \
+            --with-http_gzip_static_module \
+            --with-http_auth_request_module \
+            --with-http_random_index_module \
+            --with-http_secure_link_module \
+            --with-http_slice_module \
+            --with-http_stub_status_module \
+            --with-stream \
+            --with-stream_ssl_module \
+            --with-stream_realip_module \
+            --with-stream_ssl_preread_module \
+            --with-cc-opt="-O2 -fstack-protector-strong -D_FORTIFY_SOURCE=2" \
+            --with-ld-opt="-static"
+          make -j"$(nproc)"
+          strip objs/nginx
+          file objs/nginx
+          ldd objs/nginx 2>&1 || true
+          ./objs/nginx -V
+          # Lo que va en el tar.gz
+          dist=/work/dist
+          rm -rf "$dist" && mkdir -p "$dist/conf" "$dist/licenses"
+          cp objs/nginx "$dist/nginx"
+          cp conf/mime.types conf/fastcgi_params conf/fastcgi.conf "$dist/conf/"
+          cp LICENSE "$dist/licenses/LICENSE-nginx.txt"
+          cp README "$dist/licenses/README-nginx.txt" 2>/dev/null || true
+          {
+            echo "nginx $NGINX_VERSION, estatico (musl) para Linux x86_64, compilado por get-roost/roost-builds."
+            echo "Fuente: https://nginx.org/download/nginx-$NGINX_VERSION.tar.gz (firma PGP de nginx.org verificada)."
+            echo
+            echo "Enlazado en estatico con:"
+            apk info -d openssl-libs-static pcre2-static zlib-static 2>/dev/null | grep -E "description|^[a-z]" || true
+            apk list --installed 2>/dev/null | grep -E "^(openssl-libs-static|pcre2-static|zlib-static|musl)-" || true
+            echo
+            echo "Licencias: nginx (BSD-2, licenses/LICENSE-nginx.txt), OpenSSL (Apache-2.0), PCRE2 (BSD-3), zlib (zlib), musl (MIT)."
+            echo
+            ./objs/nginx -V 2>&1
+          } > "$dist/BUILD.txt"
+          # Las licencias de lo enlazado, por version (si una URL falla, queda la nota de BUILD.txt)
+          ossl=$(apk list --installed 2>/dev/null | sed -n 's/^openssl-libs-static-\([0-9][0-9.]*\)-r.*/\1/p' | head -1)
+          pcre=$(apk list --installed 2>/dev/null | sed -n 's/^pcre2-static-\([0-9][0-9.]*\)-r.*/\1/p' | head -1)
+          zl=$(apk list --installed 2>/dev/null | sed -n 's/^zlib-static-\([0-9][0-9.]*\)-r.*/\1/p' | head -1)
+          apk add --no-cache curl
+          curl -fsSL -o "$dist/licenses/LICENSE-openssl.txt" "https://raw.githubusercontent.com/openssl/openssl/openssl-$ossl/LICENSE.txt" || echo "sin LICENSE de OpenSSL $ossl"
+          curl -fsSL -o "$dist/licenses/LICENCE-pcre2.md" "https://raw.githubusercontent.com/PCRE2Project/pcre2/pcre2-$pcre/LICENCE.md" || echo "sin LICENCE de PCRE2 $pcre"
+          curl -fsSL -o "$dist/licenses/LICENSE-zlib.txt" "https://raw.githubusercontent.com/madler/zlib/v$zl/LICENSE" || echo "sin LICENSE de zlib $zl"
+          curl -fsSL -o "$dist/licenses/COPYRIGHT-musl.txt" "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT" || echo "sin COPYRIGHT de musl"
+          chmod 755 "$dist/nginx"
+          chmod 644 "$dist"/conf/* "$dist"/licenses/* "$dist/BUILD.txt"
+          cd "$dist"
+          tar --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$(stat -c %Y /work/source/nginx-$NGINX_VERSION.tar.gz)" \
+            -czf "/work/nginx-$NGINX_VERSION-linux-x86_64.tar.gz" nginx conf licenses BUILD.txt
+          EOF
+          docker run --rm -e NGINX_VERSION -v "$PWD:/work" -w /work "$ALPINE" sh /work/build.sh
+          ls -la "nginx-$NGINX_VERSION-linux-x86_64.tar.gz"
+          sha256sum "nginx-$NGINX_VERSION-linux-x86_64.tar.gz" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          tar -tzvf "nginx-$NGINX_VERSION-linux-x86_64.tar.gz"
+
+      - name: Artefacto
+        uses: actions/upload-artifact@v7
+        with:
+          name: nginx-${{ env.NGINX_VERSION }}-linux-x86_64
+          path: |
+            nginx-${{ env.NGINX_VERSION }}-linux-x86_64.tar.gz
+            SHA256SUMS.txt
+            dist/BUILD.txt
+          if-no-files-found: error
+
+  # Lo prueba en una distro glibc (el runner) como lo usa Roost: -p <raiz>/ -c <conf> con pid y temporales
+  # bajo run/, sin `user`, como usuario normal; -t, arranca, sirve un fichero y para con -s quit.
+  test:
+    name: Probar en Ubuntu
+    needs: build
+    if: ${{ inputs.from_run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: nginx-${{ needs.build.outputs.version }}-linux-x86_64
+      - name: nginx -V, -t y una peticion
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS.txt
+          mkdir -p casa/bin/nginx/$V casa/run/nginx-temp casa/logs casa/etc/nginx casa/www
+          tar -xzf "nginx-$V-linux-x86_64.tar.gz" -C "casa/bin/nginx/$V"
+          ls -la "casa/bin/nginx/$V" "casa/bin/nginx/$V/conf" "casa/bin/nginx/$V/licenses"
+          file "casa/bin/nginx/$V/nginx"
+          "casa/bin/nginx/$V/nginx" -V
+          root="$PWD/casa"
+          echo "<h1>Roost funciona</h1>" > casa/www/index.html
+          cat > casa/etc/nginx/nginx.conf <<EOF
+          # Como el nginx.conf que genera Roost (NginxConf), con rutas absolutas
+          worker_processes 1;
+          pid "$root/run/nginx.pid";
+          error_log "$root/logs/nginx-error.log" warn;
+          events { worker_connections 1024; }
+          http {
+              include "$root/bin/nginx/$V/conf/mime.types";
+              default_type application/octet-stream;
+              sendfile on;
+              access_log "$root/logs/nginx-access.log";
+              client_body_temp_path "$root/run/nginx-temp/client_body";
+              proxy_temp_path "$root/run/nginx-temp/proxy";
+              fastcgi_temp_path "$root/run/nginx-temp/fastcgi";
+              uwsgi_temp_path "$root/run/nginx-temp/uwsgi";
+              scgi_temp_path "$root/run/nginx-temp/scgi";
+              upstream php-8.4 { server 127.0.0.1:9840 max_fails=0; }
+              server {
+                  listen 127.0.0.1:18080;
+                  listen [::1]:18080;
+                  server_name localhost;
+                  root "$root/www";
+                  index index.php index.html;
+                  location ~ \.php\$ {
+                      fastcgi_pass php-8.4;
+                      fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+                      include "$root/bin/nginx/$V/conf/fastcgi_params";
+                  }
+              }
+          }
+          EOF
+          args=(-p "$root/" -c "$root/etc/nginx/nginx.conf")
+          "casa/bin/nginx/$V/nginx" -t "${args[@]}"
+          "casa/bin/nginx/$V/nginx" "${args[@]}"
+          sleep 1
+          cat casa/run/nginx.pid
+          curl -fsS http://127.0.0.1:18080/ | grep "Roost funciona"
+          "casa/bin/nginx/$V/nginx" -s reload "${args[@]}"
+          sleep 1
+          curl -fsS http://127.0.0.1:18080/ | grep "Roost funciona"
+          "casa/bin/nginx/$V/nginx" -s quit "${args[@]}"
+          sleep 1
+          ! pgrep -f "casa/bin/nginx/$V/nginx" || { echo "nginx sigue en marcha tras -s quit"; exit 1; }
+          cat casa/logs/nginx-error.log || true
+
+  # Solo con publish: true o por la etiqueta nginx-<versión>: attestation de procedencia y la release. Con
+  # from_run se publica el artefacto de ese run (el que se probó y cuyo SHA-256 lleva Roost) sin recompilar.
+  release:
+    name: Release
+    needs: [build, test]
+    if: ${{ !cancelled() && (inputs.publish == true || startsWith(github.ref, 'refs/tags/nginx-')) && (inputs.from_run != '' || needs.test.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      actions: read
+    env:
+      V: ${{ inputs.version || needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: nginx-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Comprobar el artefacto
+        run: |
+          set -euo pipefail
+          ls -la
+          sha256sum -c SHA256SUMS.txt
+          sha256sum "nginx-$V-linux-x86_64.tar.gz"
+      - name: Attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: nginx-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64.tar.gz
+      - name: Release nginx-${{ inputs.version || needs.build.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="nginx $V estatico para Linux x86_64 (musl; pcre2, zlib y OpenSSL enlazados), compilado desde el tarball de nginx.org con su firma PGP verificada. Lo instala Roost en Linux. Verificar: \`sha256sum -c SHA256SUMS.txt\` y \`gh attestation verify nginx-$V-linux-x86_64.tar.gz --repo get-roost/roost-builds\`."
+          if gh release view "nginx-$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "nginx-$V" "nginx-$V-linux-x86_64.tar.gz" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "nginx-$V" "nginx-$V-linux-x86_64.tar.gz" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "nginx $V (Linux x86_64)" --notes "$notes" --target "$GITHUB_SHA"
+          fi
