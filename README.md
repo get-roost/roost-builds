@@ -21,12 +21,20 @@ gh attestation verify php-8.4.27-nts-linux-x86_64.tar.gz --repo get-roost/roost-
 Cada workflow comprueba antes las fuentes de upstream: el SHA-256 que publica php.net, la firma PGP
 de nginx.org y el SHA-256 de `redis/redis-hashes`.
 
+## Cómo se publica
+
+Lanzado a mano (`workflow_dispatch`), un workflow solo compila, prueba y deja artefactos. Para
+publicar, se lanza con `publish: true` y `from_run: <id del run probado>`: publica tal cual los
+artefactos de ese run (los mismos bytes cuyo SHA-256 lleva Roost), sin recompilar. Una etiqueta
+`php-<versión>` o `nginx-<versión>` compila y publica de cero; entonces hay que fijar en Roost los
+SHA-256 de lo publicado.
+
 ## Qué hay
 
 | Build | Cómo | Fuente |
 |---|---|---|
-| PHP 8.x (`php`, `php-fpm`, `xdebug.so`) | [static-php-cli](https://github.com/crazywhalecc/static-php-cli) con el target glibc 2.17 (corre en cualquier distro con glibc ≥ 2.17 y puede cargar `xdebug.so`) | [php.net](https://www.php.net/downloads.php), [xdebug.org](https://xdebug.org/download) |
-| nginx | estático, en Alpine (pcre2, zlib, OpenSSL) | [nginx.org](https://nginx.org/en/download.html) |
+| PHP 8.1–8.5 (`bin/php`, `bin/php-fpm`, `ext/xdebug.so`, `BUILD.json`, `licenses/`) | `php.yml`: [static-php-cli](https://github.com/crazywhalecc/static-php-cli) 3.0.0-alpha1 (rama `v3`, commit fijado) desde su fuente, `SPC_TARGET=x86_64-linux-gnu.2.17` (cualquier distro con glibc ≥ 2.17 y cualquier CPU x86_64), 41 extensiones integradas. Se comprueba `php -m`, `php-fpm -t` y sirviendo por FastCGI, Xdebug cargando, GLIBC ≤ 2.17, el arranque en centos:7, debian:10 y ubuntu:18.04 y en una CPU sin AVX (qemu) | [php.net](https://www.php.net/downloads.php), [xdebug.org](https://xdebug.org/download), verificadas con el SHA-256 que publican antes de compilar |
+| nginx | `nginx.yml`: estático, en Alpine (pcre2, zlib, OpenSSL). Se comprueba `nginx -t` con una conf como la de Roost, sirviendo, recargando y parando | [nginx.org](https://nginx.org/en/download.html), verificada con su firma PGP y la huella del firmante fijada en el workflow |
 | Redis | estático, en Alpine | [download.redis.io](https://download.redis.io/releases/) |
 
 ## Licencias

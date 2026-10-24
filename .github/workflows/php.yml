@@ -20,12 +20,12 @@ on:
         description: 'Publicar la release php-<version> de cada rama (sin marcar, solo quedan los artefactos)'
         type: boolean
         default: false
+      from_run:
+        description: 'Con publish: publicar tal cual los artefactos de este run (su id), los ya probados, sin recompilar (recompilar da otro SHA-256 que el fijado en Roost)'
+        type: string
+        default: ''
   push:
     tags: ['php-*']
-    # En la rama de trabajo, cada cambio del workflow lo compila (GitHub solo registra un workflow
-    # cuando corre por un evento; hasta entonces no se puede lanzar a mano). En main no se dispara por push.
-    branches: ['feat/php']
-    paths: ['.github/workflows/php.yml']
 
 permissions:
   contents: read
@@ -84,6 +84,8 @@ jobs:
   build:
     name: PHP ${{ matrix.branch }}
     needs: plan
+    # Con from_run no se compila: se publica lo de aquel run.
+    if: ${{ inputs.from_run == '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 150
     strategy:
@@ -348,10 +350,12 @@ jobs:
           path: out/
           if-no-files-found: error
 
+  # Con from_run se publican los artefactos de aquel run (los que se probaron y cuyos SHA-256 lleva Roost
+  # en LinuxPhpCatalog) sin recompilar; si no, los de este run, solo si todas las ramas salieron bien.
   publish:
     name: Publicar PHP ${{ matrix.branch }}
     needs: [plan, build]
-    if: needs.plan.outputs.publish == 'true'
+    if: ${{ !cancelled() && needs.plan.outputs.publish == 'true' && (inputs.from_run != '' || needs.build.result == 'success') }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -360,12 +364,15 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      actions: read
     steps:
       - name: Artefacto
         uses: actions/download-artifact@v8
         with:
           name: php-${{ matrix.branch }}
           path: out
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Comprobar las sumas
         id: info
