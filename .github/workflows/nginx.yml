@@ -38,10 +38,12 @@ env:
   #   573B FD6B 3D8F BC64 1079 A6AB ABF5 BD82 7BD9 BF62  nginx signing key (nginx_signing.key)
   TRUSTED_FINGERPRINTS: "D6786CE303D9A9022998DC6CC8464D549AF75C0A 573BFD6B3D8FBC641079A6ABABF5BD827BD9BF62"
   ALPINE: "alpine:3.22"
+  # La que se compila en un push a la rama (sin input ni etiqueta): la que fija Roost (NginxCatalog).
+  DEFAULT_VERSION: "1.30.6"
 
 jobs:
   build:
-    name: nginx ${{ inputs.version || github.ref_name }}
+    name: nginx ${{ inputs.version || '1.30.6' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -50,7 +52,14 @@ jobs:
       - name: Versión
         id: version
         run: |
-          if [ -n "${{ inputs.version }}" ]; then v="${{ inputs.version }}"; else v="${GITHUB_REF_NAME#nginx-}"; fi
+          # A mano, la del input; por etiqueta nginx-<versión>, la de la etiqueta; en un push a la rama, la fijada.
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/nginx-*) v="${GITHUB_REF_NAME#nginx-}" ;;
+              *) v="$DEFAULT_VERSION" ;;
+            esac
+          fi
           echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Versión rara: $v"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "NGINX_VERSION=$v" >> "$GITHUB_ENV"
