@@ -93,6 +93,9 @@ jobs:
       BRANCH: ${{ matrix.branch }}
       TAG_VERSION: ${{ matrix.tag_version }}
       SPC_DIR: ${{ github.workspace }}/spc
+      # static-php-cli baja muchas librerias de releases de GitHub por la API, que sin token limita a 60
+      # peticiones por hora y por IP (y los runners comparten IP): con el token del workflow no se agota.
+      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Version y SHA-256 de la fuente, segun php.net
         id: php
