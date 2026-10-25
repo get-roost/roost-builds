@@ -88,7 +88,8 @@ jobs:
 
       - name: Sin token, a mano
         if: ${{ steps.fijar.outputs.cambia == 'true' && env.ABRIR_PR == 'true' && env.ROOST_PR_TOKEN == '' }}
-        run: echo "::warning::Falta el secreto ROOST_PR_TOKEN: no se abre el PR. Hay que fijar a mano en Roost lo que dice el resumen."
+        run: |
+          echo "::warning::Falta el secreto ROOST_PR_TOKEN: no se abre el PR. Hay que fijar a mano en Roost lo que dice el resumen."
 
       - name: PR en get-roost/roost
         if: ${{ steps.fijar.outputs.cambia == 'true' && env.ABRIR_PR == 'true' && env.ROOST_PR_TOKEN != '' }}
