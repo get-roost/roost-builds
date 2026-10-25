@@ -86,6 +86,19 @@ jobs:
             git diff
           fi
 
+      # Sin crear nada: que el token puede escribir en get-roost/roost (un push --dry-run pasa por la
+      # autenticación de escritura) y leer sus PR. Así un token caducado o sin permisos se ve en cada run.
+      - name: Comprobar el token
+        if: ${{ env.ROOST_PR_TOKEN != '' }}
+        run: |
+          set -euo pipefail
+          cd roost
+          git push --dry-run -q "https://x-access-token:${ROOST_PR_TOKEN}@github.com/get-roost/roost.git" "HEAD:refs/heads/builds/comprobar-token" \
+            || { echo "::error::ROOST_PR_TOKEN no puede escribir en get-roost/roost (caducado o sin el permiso Contents de escritura)"; exit 1; }
+          GH_TOKEN="$ROOST_PR_TOKEN" gh api repos/get-roost/roost/pulls -q 'length' > /dev/null \
+            || { echo "::error::ROOST_PR_TOKEN no puede leer los PR de get-roost/roost (falta el permiso Pull requests)"; exit 1; }
+          echo "ROOST_PR_TOKEN puede escribir en get-roost/roost y leer sus PR."
+
       - name: Sin token, a mano
         if: ${{ steps.fijar.outputs.cambia == 'true' && env.ABRIR_PR == 'true' && env.ROOST_PR_TOKEN == '' }}
         run: |
