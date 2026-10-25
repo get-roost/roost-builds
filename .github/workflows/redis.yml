@@ -1,0 +1,259 @@
+# Redis estático para Linux x86_64 (el que instala Roost en Linux, plan de Linux L2 «Web, BD y servicios»).
+#
+# Se compila en Alpine (musl) enlazado del todo en estático (jemalloc y OpenSSL para TLS), así corre en
+# cualquier distro x86_64 sin depender de la glibc ni de librerías del sistema. La fuente es el tarball
+# de download.redis.io, verificado con el SHA-256 que publica el propio proyecto en github.com/redis/redis-hashes
+# (Redis no firma los tarballs con PGP). Solo el servidor, el cliente y redis-benchmark: los módulos de
+# Redis 8 (JSON, búsqueda, series temporales, filtros) no se compilan.
+#
+# Licencia: Redis 8 va bajo tres licencias a elegir (RSALv2, SSPLv1 o AGPLv3). Roost lo redistribuye bajo
+# la AGPLv3, y por eso la release enlaza la fuente exacta y este workflow (el «código correspondiente»), y
+# el tar.gz lleva las licencias dentro.
+#
+# Deja el artefacto redis-<versión>-linux-x86_64.tar.gz (redis-server, redis-cli, redis-benchmark, redis.conf
+# de ejemplo, las licencias y BUILD.txt) y SHA256SUMS.txt. Solo publica la release `redis-<versión>` con
+# `publish: true` o por la etiqueta; un workflow_dispatch normal deja solo artefactos. El SHA-256 del tar.gz
+# va fijado también en Roost (RedisCatalog.Linux).
+name: redis
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versión de Redis (la última estable de github.com/redis/redis-hashes)"
+        required: true
+        default: "8.10.2"
+      publish:
+        description: "Publicar la release redis-<versión> (si no, solo artefactos)"
+        type: boolean
+        default: false
+      from_run:
+        description: "Con publish: publicar tal cual el artefacto de este run (su id), el ya probado, sin recompilar (recompilar podria dar otro SHA-256 que el fijado en Roost)"
+        required: false
+        default: ""
+  push:
+    tags: ["redis-*"]
+    # TEMPORAL (rama de trabajo feat/redis, L2): hasta que el workflow esté en main, GitHub no deja lanzarlo a
+    # mano; un push a la rama compila y prueba (sin publicar). Quitar al integrar.
+    branches: ["feat/redis"]
+    paths: [".github/workflows/redis.yml"]
+
+permissions:
+  contents: read
+
+env:
+  ALPINE: "alpine:3.22"
+  # La que se compila en un push a la rama (sin input ni etiqueta): la que fija Roost (RedisCatalog.Linux).
+  DEFAULT_VERSION: "8.10.2"
+
+jobs:
+  build:
+    name: Redis ${{ inputs.version || '8.10.2' }}
+    if: ${{ inputs.from_run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Versión
+        id: version
+        run: |
+          # A mano, la del input; por etiqueta redis-<versión>, la de la etiqueta; en un push a la rama, la fijada.
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            case "$GITHUB_REF" in
+              refs/tags/redis-*) v="${GITHUB_REF_NAME#redis-}" ;;
+              *) v="$DEFAULT_VERSION" ;;
+            esac
+          fi
+          echo "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "Versión rara: $v"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "REDIS_VERSION=$v" >> "$GITHUB_ENV"
+
+      # La fuente, verificada ANTES de compilar nada: el SHA-256 de la lista oficial de redis-hashes
+      # («hash redis-<v>.tar.gz sha256 <hex> <url>»), que mantiene el propio proyecto en otro repo.
+      - name: Fuente de download.redis.io y SHA-256 de redis-hashes
+        run: |
+          set -euo pipefail
+          mkdir -p source && cd source
+          curl -fsSL -A "roost-builds (curl)" -o hashes.txt "https://raw.githubusercontent.com/redis/redis-hashes/master/README"
+          line=$(grep -E "^hash redis-$REDIS_VERSION\.tar\.gz sha256 [0-9a-f]{64} " hashes.txt || true)
+          [ -n "$line" ] || { echo "::error::redis-hashes no tiene la linea de redis-$REDIS_VERSION.tar.gz: ¿existe esa version?"; exit 1; }
+          expected=$(awk '{ print $4 }' <<<"$line")
+          echo "redis-hashes: $line"
+          curl -fsSL -A "roost-builds (curl)" -o "redis-$REDIS_VERSION.tar.gz" "https://download.redis.io/releases/redis-$REDIS_VERSION.tar.gz"
+          echo "$expected  redis-$REDIS_VERSION.tar.gz" | sha256sum -c -
+          sha256sum "redis-$REDIS_VERSION.tar.gz" | tee source-sha256.txt
+
+      # Compila dentro de Alpine (desde el host, que es quien sube los artefactos): todo estático.
+      - name: Compilar (Alpine, estático)
+        run: |
+          set -euo pipefail
+          cat > build.sh <<'EOF'
+          set -euxo pipefail
+          apk add --no-cache build-base linux-headers openssl-dev openssl-libs-static pkgconf tar curl file
+          cd /work/source
+          tar -xzf "redis-$REDIS_VERSION.tar.gz"
+          cd "redis-$REDIS_VERSION"
+          # BUILD_TLS: redis-server y redis-cli con TLS (OpenSSL estatico). USE_SYSTEMD=no: sin libsystemd.
+          # jemalloc se compila dentro (deps/) y se enlaza en estatico; -static deja el binario sin dependencias.
+          make -j"$(nproc)" BUILD_TLS=yes USE_SYSTEMD=no MALLOC=jemalloc LDFLAGS="-static" V=1
+          strip src/redis-server src/redis-cli src/redis-benchmark
+          file src/redis-server src/redis-cli src/redis-benchmark
+          ldd src/redis-server 2>&1 || true
+          ./src/redis-server --version
+          ./src/redis-cli --version
+          # Lo que va en el tar.gz
+          dist=/work/dist
+          rm -rf "$dist" && mkdir -p "$dist/licenses"
+          cp src/redis-server src/redis-cli src/redis-benchmark "$dist/"
+          cp redis.conf "$dist/redis.conf.ejemplo"
+          for f in LICENSE.txt LICENSE COPYING REDISCONTRIBUTIONS.txt TRADEMARKS.md; do [ -f "$f" ] && cp "$f" "$dist/licenses/$f" || true; done
+          [ -d licenses ] && cp -r licenses/. "$dist/licenses/" || true
+          # La licencia de jemalloc (BSD-2) y la de OpenSSL (Apache-2.0), que van enlazadas dentro.
+          jem=$(ls -d deps/jemalloc 2>/dev/null | head -1)
+          [ -n "$jem" ] && [ -f "$jem/COPYING" ] && cp "$jem/COPYING" "$dist/licenses/COPYING-jemalloc.txt" || true
+          ossl=$(apk list --installed 2>/dev/null | sed -n 's/^openssl-libs-static-\([0-9][0-9.]*\)-r.*/\1/p' | head -1)
+          curl -fsSL -o "$dist/licenses/LICENSE-openssl.txt" "https://raw.githubusercontent.com/openssl/openssl/openssl-$ossl/LICENSE.txt" || echo "sin LICENSE de OpenSSL $ossl"
+          curl -fsSL -o "$dist/licenses/COPYRIGHT-musl.txt" "https://git.musl-libc.org/cgit/musl/plain/COPYRIGHT" || echo "sin COPYRIGHT de musl"
+          {
+            echo "Redis $REDIS_VERSION, estatico (musl) para Linux x86_64, compilado por get-roost/roost-builds (.github/workflows/redis.yml)."
+            echo "Fuente: https://download.redis.io/releases/redis-$REDIS_VERSION.tar.gz (SHA-256 verificado con github.com/redis/redis-hashes)."
+            echo "Solo redis-server, redis-cli y redis-benchmark (sin los modulos de Redis 8). TLS con OpenSSL $ossl; jemalloc enlazado en estatico."
+            echo
+            echo "Licencias: Redis (RSALv2, SSPLv1 o AGPLv3, a elegir: licenses/), jemalloc (BSD-2), OpenSSL (Apache-2.0), musl (MIT)."
+            echo "Roost lo redistribuye bajo la AGPLv3: la fuente y el workflow con que se compilo estan enlazados en la release."
+            echo
+            ./src/redis-server --version
+          } > "$dist/BUILD.txt"
+          chmod 755 "$dist"/redis-server "$dist"/redis-cli "$dist"/redis-benchmark
+          chmod 644 "$dist"/redis.conf.ejemplo "$dist"/licenses/* "$dist/BUILD.txt"
+          cd "$dist"
+          tar --owner=0 --group=0 --numeric-owner --sort=name --mtime="@$(stat -c %Y /work/source/redis-$REDIS_VERSION.tar.gz)" \
+            -czf "/work/redis-$REDIS_VERSION-linux-x86_64.tar.gz" redis-server redis-cli redis-benchmark redis.conf.ejemplo licenses BUILD.txt
+          EOF
+          docker run --rm -e REDIS_VERSION -v "$PWD:/work" -w /work "$ALPINE" sh /work/build.sh
+          ls -la "redis-$REDIS_VERSION-linux-x86_64.tar.gz"
+          sha256sum "redis-$REDIS_VERSION-linux-x86_64.tar.gz" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          tar -tzvf "redis-$REDIS_VERSION-linux-x86_64.tar.gz"
+
+      - name: Artefacto
+        uses: actions/upload-artifact@v7
+        with:
+          name: redis-${{ env.REDIS_VERSION }}-linux-x86_64
+          path: |
+            redis-${{ env.REDIS_VERSION }}-linux-x86_64.tar.gz
+            SHA256SUMS.txt
+            dist/BUILD.txt
+          if-no-files-found: error
+
+  # Lo prueba en una distro glibc (el runner) como lo usa Roost: redis-server <conf> desde la carpeta del
+  # conf, solo en 127.0.0.1, con AOF, como usuario normal; PING, SET/GET y la parada con redis-cli shutdown.
+  test:
+    name: Probar en Ubuntu
+    needs: build
+    if: ${{ inputs.from_run == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: redis-${{ needs.build.outputs.version }}-linux-x86_64
+      - name: redis-server --version, PING, SET/GET y shutdown
+        env:
+          V: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          sha256sum -c SHA256SUMS.txt
+          mkdir -p casa/bin/redis/$V casa/etc/redis/conf.d casa/data/redis casa/logs
+          tar -xzf "redis-$V-linux-x86_64.tar.gz" -C "casa/bin/redis/$V"
+          ls -la "casa/bin/redis/$V" "casa/bin/redis/$V/licenses"
+          file "casa/bin/redis/$V/redis-server"
+          ldd "casa/bin/redis/$V/redis-server" 2>&1 || true
+          "casa/bin/redis/$V/redis-server" --version | grep -F "v=$V"
+          root="$PWD/casa"
+          # Como el redis.conf que genera Roost (RedisConf): loopback, AOF y el fragmento del usuario al final.
+          cat > casa/etc/redis/redis.conf <<EOF
+          bind 127.0.0.1 -::1
+          port 16390
+          protected-mode yes
+          daemonize no
+          logfile ""
+          dir "$root/data/redis"
+          appendonly yes
+          appendfsync everysec
+          maxclients 1000
+          include $root/etc/redis/conf.d/99-usuario.conf
+          EOF
+          echo "# tuyo" > casa/etc/redis/conf.d/99-usuario.conf
+          (cd casa/etc/redis && "$root/bin/redis/$V/redis-server" redis.conf > "$root/logs/redis.log" 2>&1 &)
+          for i in $(seq 1 50); do "casa/bin/redis/$V/redis-cli" -p 16390 PING 2>/dev/null | grep -q PONG && break; sleep 0.1; done
+          "casa/bin/redis/$V/redis-cli" -p 16390 PING | grep -x PONG
+          "casa/bin/redis/$V/redis-cli" -p 16390 SET roost funciona | grep -x OK
+          "casa/bin/redis/$V/redis-cli" -p 16390 GET roost | grep -x funciona
+          "casa/bin/redis/$V/redis-cli" -p 16390 INFO server | grep -E "^redis_version:$V"
+          "casa/bin/redis/$V/redis-cli" -p 16390 shutdown || true
+          sleep 1
+          ! pgrep -f "bin/redis/$V/redis-server" || { echo "redis-server sigue en marcha tras shutdown"; exit 1; }
+          ls -la casa/data/redis
+          cat casa/logs/redis.log
+
+  # Solo con publish: true o por la etiqueta redis-<versión>: attestation de procedencia y la release. Con
+  # from_run se publica el artefacto de ese run (el que se probó y cuyo SHA-256 lleva Roost) sin recompilar.
+  release:
+    name: Release
+    needs: [build, test]
+    if: ${{ !cancelled() && (inputs.publish == true || startsWith(github.ref, 'refs/tags/redis-')) && (inputs.from_run != '' || needs.test.result == 'success') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      actions: read
+    env:
+      V: ${{ inputs.version || needs.build.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: redis-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64
+          run-id: ${{ inputs.from_run || github.run_id }}
+          github-token: ${{ github.token }}
+      - name: Comprobar el artefacto
+        run: |
+          set -euo pipefail
+          ls -la
+          sha256sum -c SHA256SUMS.txt
+          sha256sum "redis-$V-linux-x86_64.tar.gz"
+      - name: Attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: redis-${{ inputs.version || needs.build.outputs.version }}-linux-x86_64.tar.gz
+      - name: Release redis-${{ inputs.version || needs.build.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN: ${{ inputs.from_run || github.run_id }}
+        run: |
+          set -euo pipefail
+          notes="Redis $V estatico para Linux x86_64 (musl; jemalloc y OpenSSL enlazados), compilado desde el tarball oficial con su SHA-256 verificado contra github.com/redis/redis-hashes. Solo redis-server, redis-cli y redis-benchmark (sin los modulos de Redis 8). Lo instala Roost en Linux.
+
+          Licencia: Redis 8 se distribuye bajo RSALv2, SSPLv1 o AGPLv3, a elegir; esta build se redistribuye bajo la **AGPLv3** (las licencias van en \`licenses/\` dentro del tar.gz). El codigo correspondiente: la fuente https://download.redis.io/releases/redis-$V.tar.gz y el workflow con que se compilo, https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/.github/workflows/redis.yml (run https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN).
+
+          Verificar: \`sha256sum -c SHA256SUMS.txt\` y \`gh attestation verify redis-$V-linux-x86_64.tar.gz --repo get-roost/roost-builds\`."
+          if gh release view "redis-$V" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "redis-$V" "redis-$V-linux-x86_64.tar.gz" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "redis-$V" "redis-$V-linux-x86_64.tar.gz" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "Redis $V (Linux x86_64)" --notes "$notes" --target "$GITHUB_SHA"
+          fi
+
+  # Lo publicado, a Roost: un PR en get-roost/roost con el SHA-256 nuevo (fijar-en-roost.yml).
+  fijar-en-roost:
+    name: PR en Roost
+    needs: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    uses: ./.github/workflows/fijar-en-roost.yml
+    with:
+      producto: redis
+      run: ${{ inputs.from_run || github.run_id }}
+    secrets: inherit

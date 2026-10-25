@@ -3,11 +3,13 @@
 
   fijar-en-roost.py php   <carpeta-de-roost> [--ramas 8.5,8.4] [--run <id>]
   fijar-en-roost.py nginx <carpeta-de-roost> [--run <id>]
+  fijar-en-roost.py redis <carpeta-de-roost> [--run <id>]
 
 php: por cada rama (todas las que haya publicadas si no se dice), la última release php-<rama>.<n>, el
 tamaño de su tar.gz y su SHA-256 (del SHA256SUMS.txt de la release), en el `Pinned` de
 src/Roost.Core/Install/LinuxPhpCatalog.cs. nginx: la última release nginx-<versión>, en NginxCatalog.Linux
-de src/Roost.Core/Install/NginxInstaller.cs. Solo lee: las releases son públicas; con GH_TOKEN, la API no
+de src/Roost.Core/Install/NginxInstaller.cs. redis: la última release redis-<versión>, en RedisCatalog.Linux
+de src/Roost.Core/Install/RedisInstaller.cs. Solo lee: las releases son públicas; con GH_TOKEN, la API no
 corta a 60 peticiones por hora. Escribe en CAMBIOS (si está) lo que ha cambiado, para el cuerpo del PR, y
 sale con 0 aunque no haya nada que cambiar. Sin dependencias: solo la biblioteca estándar.
 """
@@ -98,41 +100,50 @@ def php(root, ramas, run):
     return changes
 
 
-def nginx(root, run):
-    path = os.path.join(root, "src", "Roost.Core", "Install", "NginxInstaller.cs")
+def pinned_block(producto, file, build_type, root, run):
+    """nginx y redis: el bloque `<Catalog>.Linux` de su instalador (el comentario «// <producto>-<v>-linux-x86_64.tar.gz
+    (<n> bytes) … run <id> de <producto>.yml, <fecha>, …» y el `new(...)` hasta el «);»), con la última release."""
+    path = os.path.join(root, "src", "Roost.Core", "Install", file)
     text = open(path, encoding="utf-8").read()
-    rel = max((r for r in releases() if re.fullmatch(r"nginx-\d+\.\d+\.\d+", r["tag_name"])),
-              key=lambda r: version_key(r["tag_name"][6:]), default=None)
+    rel = max((r for r in releases() if re.fullmatch(producto + r"-\d+\.\d+\.\d+", r["tag_name"])),
+              key=lambda r: version_key(r["tag_name"][len(producto) + 1:]), default=None)
     if rel is None:
-        sys.exit(f"No hay ninguna release nginx-x.y.z en {REPO}")
-    version = rel["tag_name"][6:]
-    sha, size = published(rel, f"nginx-{version}-linux-x86_64.tar.gz")
-    # El bloque de NginxCatalog.Linux: su comentario y el new(...) hasta el «);».
-    block = re.search(r"    // nginx-\d+\.\d+\.\d+-linux-x86_64\.tar\.gz \([\d.]+ bytes\).*?public static readonly NginxBuild Linux = new\(.*?\);",
-                      text, re.S)
+        sys.exit(f"No hay ninguna release {producto}-x.y.z en {REPO}")
+    version = rel["tag_name"][len(producto) + 1:]
+    sha, size = published(rel, f"{producto}-{version}-linux-x86_64.tar.gz")
+    block = re.search(r"    // " + producto + r"-\d+\.\d+\.\d+-linux-x86_64\.tar\.gz \([\d.]+ bytes\).*?public static readonly "
+                      + build_type + r" Linux = new\(.*?\);", text, re.S)
     if block is None:
-        sys.exit("NginxInstaller.cs no tiene el bloque de NginxCatalog.Linux como se espera")
-    old_version = re.search(r'NginxBuild Linux = new\(\s*"(\d+\.\d+\.\d+)"', block.group(0)).group(1)
+        sys.exit(f"{file} no tiene el bloque de {build_type[:-5]}Catalog.Linux como se espera")
+    old_version = re.search(build_type + r' Linux = new\(\s*"(\d+\.\d+\.\d+)"', block.group(0)).group(1)
     old_sha = re.findall(r'"([0-9a-f]{64})"', block.group(0))[-1]
     if (old_version, old_sha) == (version, sha):
         return []
     new = block.group(0).replace(old_version, version).replace(old_sha, sha)
     new = re.sub(r"\([\d.]+ bytes\)", f"({size:,} bytes)".replace(",", "."), new, count=1)
     if run:
-        new = re.sub(r"run \d+ de nginx\.yml, [^,]+,", f"run {run} de nginx.yml, {today()},", new, count=1)
+        new = re.sub(r"run \d+ de " + producto + r"\.yml, [^,]+,", f"run {run} de {producto}.yml, {today()},", new, count=1)
     open(path, "w", encoding="utf-8", newline="\n").write(text[:block.start()] + new + text[block.end():])
-    return [f"nginx {old_version} -> {version} (SHA-256 {sha}, {size} bytes); el de Windows (NginxCatalog.Windows) va aparte"]
+    return [f"{producto} {old_version} -> {version} (SHA-256 {sha}, {size} bytes); el de Windows ({build_type[:-5]}Catalog.Windows) va aparte"]
+
+
+def nginx(root, run):
+    return pinned_block("nginx", "NginxInstaller.cs", "NginxBuild", root, run)
+
+
+def redis(root, run):
+    return pinned_block("redis", "RedisInstaller.cs", "RedisBuild", root, run)
 
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("producto", choices=["php", "nginx"])
+    p.add_argument("producto", choices=["php", "nginx", "redis"])
     p.add_argument("roost")
     p.add_argument("--ramas", default="")
     p.add_argument("--run", default="")
     a = p.parse_args()
     ramas = [r for r in a.ramas.replace(" ", "").split(",") if r]
-    changes = php(a.roost, ramas, a.run) if a.producto == "php" else nginx(a.roost, a.run)
+    changes = php(a.roost, ramas, a.run) if a.producto == "php" else nginx(a.roost, a.run) if a.producto == "nginx" else redis(a.roost, a.run)
     print("\n".join(changes) if changes else "Nada que cambiar: Roost ya lleva lo publicado.")
     if os.environ.get("CAMBIOS"):
         open(os.environ["CAMBIOS"], "w", encoding="utf-8").write("\n".join(f"- {c}" for c in changes))

@@ -1,6 +1,6 @@
 # Abre un PR en get-roost/roost con los SHA-256 de lo publicado aquí (Roost lleva fijado el SHA-256 de
-# cada PHP y de cada nginx de Linux, como MinGit). Lo llaman php.yml y nginx.yml al publicar; también se
-# lanza a mano (sin PR, solo para ver qué cambiaría: «abrir_pr» sin marcar).
+# cada PHP, de cada nginx y de cada Redis de Linux, como MinGit). Lo llaman php.yml, nginx.yml y redis.yml al
+# publicar; también se lanza a mano (sin PR, solo para ver qué cambiaría: «abrir_pr» sin marcar).
 #
 # Necesita el secreto ROOST_PR_TOKEN: un token de grano fino con acceso solo a get-roost/roost y permisos
 # Contents y Pull requests de lectura y escritura. Sin él, dice lo que habría que fijar a mano y no falla.
@@ -11,7 +11,7 @@ on:
   workflow_call:
     inputs:
       producto:
-        description: "php o nginx"
+        description: "php, nginx o redis"
         type: string
         required: true
       ramas:
@@ -31,7 +31,7 @@ on:
       producto:
         description: "Qué fijar"
         type: choice
-        options: [php, nginx]
+        options: [php, nginx, redis]
         default: php
       ramas:
         description: "php: ramas (vacío = todas las publicadas)"
@@ -60,7 +60,7 @@ jobs:
       PRODUCTO: ${{ inputs.producto }}
       RAMAS: ${{ inputs.ramas }}
       RUN: ${{ inputs.run }}
-      # Llamado desde php.yml o nginx.yml, abre el PR (abrir_pr es true por defecto en workflow_call); a mano,
+      # Llamado desde php.yml, nginx.yml o redis.yml, abre el PR (abrir_pr es true por defecto en workflow_call); a mano,
       # solo si se marca. Ojo: en un workflow llamado, github.event_name es el del que llama.
       ABRIR_PR: ${{ inputs.abrir_pr }}
     steps:
