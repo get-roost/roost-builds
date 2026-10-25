@@ -33,10 +33,6 @@ on:
         default: ""
   push:
     tags: ["redis-*"]
-    # TEMPORAL (rama de trabajo feat/redis, L2): hasta que el workflow esté en main, GitHub no deja lanzarlo a
-    # mano; un push a la rama compila y prueba (sin publicar). Quitar al integrar.
-    branches: ["feat/redis"]
-    paths: [".github/workflows/redis.yml"]
 
 permissions:
   contents: read
