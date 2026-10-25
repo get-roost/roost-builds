@@ -1,0 +1,84 @@
+# Cada día mira si php.net o nginx.org tienen una versión que aún no está aquí y, si la hay, lanza su
+# workflow con publish (php.yml con las ramas nuevas, nginx.yml con la versión estable nueva): compila,
+# prueba, publica la release y abre el PR en get-roost/roost con los SHA-256 (fijar-en-roost.yml). Si una
+# rama no compila o no pasa las pruebas, no se publica nada y mañana se vuelve a intentar.
+#
+# A mano, por defecto solo dice qué hay nuevo («probar» marcado); desmarcado hace lo mismo que el diario.
+name: Vigilar versiones
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      probar:
+        description: "Solo decir qué hay nuevo, sin lanzar nada"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write   # para lanzar php.yml y nginx.yml (workflow_dispatch sí se puede lanzar con el GITHUB_TOKEN)
+
+env:
+  # Las ramas de PHP que se compilan para Linux (7.4 y 8.0 no las compila static-php-cli). Una rama nueva
+  # (8.6) se añade aquí y en el Pinned de LinuxPhpCatalog de Roost.
+  RAMAS: "8.5 8.4 8.3 8.2 8.1"
+
+jobs:
+  vigilar:
+    name: PHP y nginx
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PROBAR: ${{ github.event_name == 'workflow_dispatch' && inputs.probar }}
+    steps:
+      - name: Las releases de aquí
+        id: tags
+        run: |
+          set -euo pipefail
+          gh release list --repo "$GITHUB_REPOSITORY" --limit 500 --json tagName -q '.[].tagName' > "$RUNNER_TEMP/tags.txt"
+          echo "$(wc -l < "$RUNNER_TEMP/tags.txt") releases publicadas"
+
+      - name: PHP, según php.net
+        run: |
+          set -euo pipefail
+          nuevas=()
+          for rama in $RAMAS; do
+            json=$(curl -fsSL --retry 3 "https://www.php.net/releases/index.php?json&version=${rama}&max=1")
+            version=$(jq -r 'keys[0]' <<<"$json")
+            [[ "$version" =~ ^${rama//./\\.}\.[0-9]+$ ]] || { echo "::warning::php.net da '$version' para la rama $rama: se salta"; continue; }
+            if grep -qx "php-$version" "$RUNNER_TEMP/tags.txt"; then
+              echo "PHP $rama: $version, ya publicada"
+            else
+              echo "PHP $rama: $version, NUEVA"
+              nuevas+=("$rama")
+            fi
+          done
+          if [ ${#nuevas[@]} -eq 0 ]; then
+            echo "PHP: nada nuevo." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          lista=$(IFS=,; echo "${nuevas[*]}")
+          echo "PHP: ramas con versión nueva: $lista." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PROBAR" = "true" ]; then echo "(prueba: no se lanza php.yml)" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          gh workflow run php.yml --repo "$GITHUB_REPOSITORY" --ref main -f branches="$lista" -f publish=true
+          echo "Lanzado php.yml con publish para $lista." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: nginx, según nginx.org
+        run: |
+          set -euo pipefail
+          # La versión estable: la primera nginx-x.y.z.tar.gz tras «Stable version» en la página de descargas.
+          version=$(curl -fsSL --retry 3 https://nginx.org/en/download.html \
+            | tr '\n' ' ' | grep -oE 'Stable version.*' | grep -oE 'nginx-[0-9]+\.[0-9]+\.[0-9]+\.tar\.gz' | head -1 \
+            | sed -E 's/^nginx-//; s/\.tar\.gz$//' || true)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::warning::No se ha podido leer la estable de nginx.org"; exit 0; }
+          if grep -qx "nginx-$version" "$RUNNER_TEMP/tags.txt"; then
+            echo "nginx: $version, ya publicada" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "nginx: estable $version, NUEVA." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$PROBAR" = "true" ]; then echo "(prueba: no se lanza nginx.yml)" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
+          gh workflow run nginx.yml --repo "$GITHUB_REPOSITORY" --ref main -f version="$version" -f publish=true
+          echo "Lanzado nginx.yml con publish para $version." >> "$GITHUB_STEP_SUMMARY"

@@ -302,3 +302,14 @@ jobs:
           else
             gh release create "nginx-$V" "nginx-$V-linux-x86_64.tar.gz" SHA256SUMS.txt --repo "$GITHUB_REPOSITORY" --title "nginx $V (Linux x86_64)" --notes "$notes" --target "$GITHUB_SHA"
           fi
+
+  # Lo publicado, a Roost: un PR en get-roost/roost con el SHA-256 nuevo (fijar-en-roost.yml).
+  fijar-en-roost:
+    name: PR en Roost
+    needs: release
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    uses: ./.github/workflows/fijar-en-roost.yml
+    with:
+      producto: nginx
+      run: ${{ inputs.from_run || github.run_id }}
+    secrets: inherit

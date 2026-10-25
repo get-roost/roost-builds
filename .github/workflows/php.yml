@@ -407,3 +407,15 @@ jobs:
           args=(--title "PHP ${VERSION} (Linux x86_64)" --notes-file /tmp/notes.md)
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then args+=(--verify-tag); else args+=(--target "$GITHUB_SHA"); fi
           gh release create "$tag" "${args[@]}" out/php-*.tar.gz out/SHA256SUMS.txt out/BUILD.json
+
+  # Lo publicado, a Roost: un PR en get-roost/roost con los SHA-256 nuevos (fijar-en-roost.yml).
+  fijar-en-roost:
+    name: PR en Roost
+    needs: [plan, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    uses: ./.github/workflows/fijar-en-roost.yml
+    with:
+      producto: php
+      ramas: ${{ join(fromJson(needs.plan.outputs.matrix).include.*.branch, ',') }}
+      run: ${{ inputs.from_run || github.run_id }}
+    secrets: inherit

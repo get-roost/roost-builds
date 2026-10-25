@@ -23,7 +23,15 @@ de nginx.org y el SHA-256 de `redis/redis-hashes`.
 
 ## Cómo se publica
 
-Lanzado a mano (`workflow_dispatch`), un workflow solo compila, prueba y deja artefactos. Para
+**Solo, cada día:** `vigilar.yml` mira php.net (ramas 8.1 a 8.5) y la estable de nginx.org y, si hay una
+versión que aún no está publicada aquí, lanza su workflow con `publish`: compila, prueba, publica la
+release y, con `fijar-en-roost.yml`, abre un PR en `get-roost/roost` con los SHA-256 nuevos
+(`scripts/fijar-en-roost.py`), que entran en la siguiente versión de Roost. Si algo no compila o no pasa
+las pruebas, no se publica nada y al día siguiente se vuelve a intentar. El PR necesita el secreto
+`ROOST_PR_TOKEN`: un token de grano fino con acceso solo a `get-roost/roost` y permisos *Contents* y *Pull
+requests* de lectura y escritura. Sin él, el resumen del run dice qué fijar a mano.
+
+**A mano:** lanzado con `workflow_dispatch`, un workflow solo compila, prueba y deja artefactos. Para
 publicar, se lanza con `publish: true` y `from_run: <id del run probado>`: publica tal cual los
 artefactos de ese run (los mismos bytes cuyo SHA-256 lleva Roost), sin recompilar. Una etiqueta
 `php-<versión>` o `nginx-<versión>` compila y publica de cero; entonces hay que fijar en Roost los

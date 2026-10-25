@@ -1,0 +1,114 @@
+# Abre un PR en get-roost/roost con los SHA-256 de lo publicado aquí (Roost lleva fijado el SHA-256 de
+# cada PHP y de cada nginx de Linux, como MinGit). Lo llaman php.yml y nginx.yml al publicar; también se
+# lanza a mano (sin PR, solo para ver qué cambiaría: «abrir_pr» sin marcar).
+#
+# Necesita el secreto ROOST_PR_TOKEN: un token de grano fino con acceso solo a get-roost/roost y permisos
+# Contents y Pull requests de lectura y escritura. Sin él, dice lo que habría que fijar a mano y no falla.
+# El script (scripts/fijar-en-roost.py) solo lee las releases de este repo, que son públicas.
+name: Fijar en Roost
+
+on:
+  workflow_call:
+    inputs:
+      producto:
+        description: "php o nginx"
+        type: string
+        required: true
+      ramas:
+        description: "php: las ramas que se acaban de publicar (8.5,8.4); vacío = todas"
+        type: string
+        default: ""
+      run:
+        description: "El run de los binarios publicados, para el comentario de Roost"
+        type: string
+        default: ""
+      abrir_pr:
+        description: "Abrir el PR en get-roost/roost"
+        type: boolean
+        default: true
+  workflow_dispatch:
+    inputs:
+      producto:
+        description: "Qué fijar"
+        type: choice
+        options: [php, nginx]
+        default: php
+      ramas:
+        description: "php: ramas (vacío = todas las publicadas)"
+        type: string
+        default: ""
+      run:
+        description: "El run de los binarios (para el comentario)"
+        type: string
+        default: ""
+      abrir_pr:
+        description: "Abrir el PR en get-roost/roost (sin marcar: solo decir qué cambiaría)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  fijar:
+    name: Fijar ${{ inputs.producto }} en Roost
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ROOST_PR_TOKEN: ${{ secrets.ROOST_PR_TOKEN }}
+      PRODUCTO: ${{ inputs.producto }}
+      RAMAS: ${{ inputs.ramas }}
+      RUN: ${{ inputs.run }}
+      # Llamado desde php.yml o nginx.yml, abre el PR (abrir_pr es true por defecto en workflow_call); a mano,
+      # solo si se marca. Ojo: en un workflow llamado, github.event_name es el del que llama.
+      ABRIR_PR: ${{ inputs.abrir_pr }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Roost (main)
+        run: git clone -q --depth 1 https://github.com/get-roost/roost.git roost
+
+      - name: Lo publicado, en Roost
+        id: fijar
+        env:
+          CAMBIOS: ${{ runner.temp }}/cambios.md
+        run: |
+          set -euo pipefail
+          python3 scripts/fijar-en-roost.py "$PRODUCTO" roost --ramas "$RAMAS" --run "$RUN"
+          cd roost
+          if git diff --quiet; then
+            echo "cambia=false" >> "$GITHUB_OUTPUT"
+            echo "Roost ya lleva lo publicado de $PRODUCTO." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "cambia=true" >> "$GITHUB_OUTPUT"
+            { echo "### Lo que cambia en Roost"; echo; cat "$CAMBIOS"; echo; echo '```diff'; git diff; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            git diff
+          fi
+
+      - name: Sin token, a mano
+        if: ${{ steps.fijar.outputs.cambia == 'true' && env.ABRIR_PR == 'true' && env.ROOST_PR_TOKEN == '' }}
+        run: echo "::warning::Falta el secreto ROOST_PR_TOKEN: no se abre el PR. Hay que fijar a mano en Roost lo que dice el resumen."
+
+      - name: PR en get-roost/roost
+        if: ${{ steps.fijar.outputs.cambia == 'true' && env.ABRIR_PR == 'true' && env.ROOST_PR_TOKEN != '' }}
+        env:
+          CAMBIOS: ${{ runner.temp }}/cambios.md
+        run: |
+          set -euo pipefail
+          cd roost
+          rama="builds/$PRODUCTO-$(date -u +%Y%m%d-%H%M%S)"
+          git checkout -q -b "$rama"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -am "$PRODUCTO de Linux: los SHA-256 de lo publicado en get-roost/roost-builds" \
+            -m "$(cat "$CAMBIOS")" -m "Run de los binarios: ${RUN:-?} (https://github.com/$GITHUB_REPOSITORY/actions/runs/${RUN:-$GITHUB_RUN_ID})."
+          git push -q "https://x-access-token:${ROOST_PR_TOKEN}@github.com/get-roost/roost.git" "HEAD:refs/heads/$rama"
+          {
+            echo "Lo ha publicado [get-roost/roost-builds](https://github.com/$GITHUB_REPOSITORY/releases) (run ${RUN:-?}): estos son sus SHA-256, sacados del \`SHA256SUMS.txt\` de cada release."
+            echo
+            cat "$CAMBIOS"
+            echo
+            echo "Antes de juntarlo: \`dotnet test Roost.slnx\` en Windows y en Linux, y una instalación de verdad en Linux (\`roost php install <rama>\` o \`roost up\`). Entra en la siguiente versión de Roost."
+          } > "$RUNNER_TEMP/pr.md"
+          GH_TOKEN="$ROOST_PR_TOKEN" gh pr create --repo get-roost/roost --base main --head "$rama" \
+            --title "$PRODUCTO de Linux: SHA-256 de lo publicado en roost-builds" --body-file "$RUNNER_TEMP/pr.md"
