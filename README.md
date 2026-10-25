@@ -33,7 +33,7 @@ SHA-256 de lo publicado.
 
 | Build | Cómo | Fuente |
 |---|---|---|
-| PHP 8.1–8.5 (`bin/php`, `bin/php-fpm`, `ext/xdebug.so`, `BUILD.json`, `licenses/`) | `php.yml`: [static-php-cli](https://github.com/crazywhalecc/static-php-cli) 3.0.0-alpha1 (rama `v3`, commit fijado) desde su fuente, `SPC_TARGET=x86_64-linux-gnu.2.17` (cualquier distro con glibc ≥ 2.17 y cualquier CPU x86_64), 41 extensiones integradas. Se comprueba `php -m`, `php-fpm -t` y sirviendo por FastCGI, Xdebug cargando, GLIBC ≤ 2.17, el arranque en centos:7, debian:10 y ubuntu:18.04 y en una CPU sin AVX (qemu) | [php.net](https://www.php.net/downloads.php), [xdebug.org](https://xdebug.org/download), verificadas con el SHA-256 que publican antes de compilar |
+| PHP 8.1–8.5 (`bin/php`, `bin/php-fpm`, `ext/xdebug.so`, `BUILD.json`, `licenses/`) | `php.yml`: [static-php-cli](https://github.com/crazywhalecc/static-php-cli) 3.0.0-alpha1 (rama `v3`, commit fijado) desde su fuente, `SPC_TARGET=x86_64-linux-gnu.2.17` (cualquier distro con glibc ≥ 2.17 y cualquier CPU x86_64), 40 extensiones integradas. Se comprueba `php -m`, `php-fpm -t` y sirviendo por FastCGI, Xdebug cargando, GLIBC ≤ 2.17, el arranque en centos:7, debian:10 y ubuntu:18.04 y en una CPU sin AVX (qemu) | [php.net](https://www.php.net/downloads.php), [xdebug.org](https://xdebug.org/download), verificadas con el SHA-256 que publican antes de compilar |
 | nginx | `nginx.yml`: estático, en Alpine (pcre2, zlib, OpenSSL). Se comprueba `nginx -t` con una conf como la de Roost, sirviendo, recargando y parando | [nginx.org](https://nginx.org/en/download.html), verificada con su firma PGP y la huella del firmante fijada en el workflow |
 | Redis | estático, en Alpine | [download.redis.io](https://download.redis.io/releases/) |
 

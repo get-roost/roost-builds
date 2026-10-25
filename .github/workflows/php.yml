@@ -47,7 +47,7 @@ env:
   XDEBUG_SHA256: f073de91bea046106abf4d6071c963ea71e58571df6ce58948ceca89d121cb2d
   # El nombre del artefacto de Xdebug en static-php-cli v3 (config/pkg/ext/ext-xdebug.yml).
   XDEBUG_ARTIFACT: ext-xdebug
-  # Las 41 extensiones del plan (lo que necesitan Laravel, WordPress y Symfony), integradas en el binario.
+  # Las 40 extensiones del plan (lo que necesitan Laravel, WordPress y Symfony), integradas en el binario.
   EXTENSIONS: apcu,bcmath,calendar,ctype,curl,dom,exif,fileinfo,filter,ftp,gd,gmp,iconv,igbinary,intl,mbstring,mysqli,mysqlnd,opcache,openssl,pcntl,pdo,pdo_mysql,pdo_sqlite,phar,posix,redis,session,simplexml,soap,sockets,sodium,sqlite3,tokenizer,xml,xmlreader,xmlwriter,xsl,zip,zlib
   # No se puede llamar LIBS: es la variable de autotools y OpenSSL la usaria para enlazar.
   GD_PACKAGES: freetype,libjpeg,libwebp
