@@ -98,7 +98,8 @@ jobs:
           # BUILD_TLS: redis-server y redis-cli con TLS (OpenSSL estatico). USE_SYSTEMD=no: sin libsystemd.
           # jemalloc se compila dentro (deps/) y se enlaza en estatico; -static deja el binario sin dependencias.
           # -static solo en el enlace final (REDIS_LDFLAGS): en LDFLAGS llegaria a las dependencias y xxhash no puede enlazar su .so con el.
-          make -j"$(nproc)" BUILD_TLS=yes USE_SYSTEMD=no MALLOC=jemalloc REDIS_LDFLAGS="-static" V=1
+          # Solo el nucleo (make -C src): el make de arriba de Redis 8 sigue con los modulos (JSON, busqueda...), que piden bash y Rust.
+          make -C src -j"$(nproc)" BUILD_TLS=yes USE_SYSTEMD=no MALLOC=jemalloc REDIS_LDFLAGS="-static" V=1 all
           strip src/redis-server src/redis-cli src/redis-benchmark
           file src/redis-server src/redis-cli src/redis-benchmark
           ldd src/redis-server 2>&1 || true
